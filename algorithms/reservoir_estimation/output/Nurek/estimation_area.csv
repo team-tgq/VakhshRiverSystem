@@ -1,0 +1,3 @@
+sensor,date,cloud_percentage,quality_flag,raw_area,clahe_area,water_cluster_area,zone_filtered_area,local_filtered_area,pre_filtering_area_km2,post_filtering_area_km2,post_outlier_removal_area_km2
+landsat,2022-06-04,5.99,1,8.55,10.33,10.29,11.48,11.45,10.29,11.45,11.45
+sentinel,2022-06-04,0.0,1,11.45,10.56,10.27,11.49,11.45,10.27,11.45,11.45

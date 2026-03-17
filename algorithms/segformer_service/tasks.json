@@ -1,0 +1,16 @@
+{
+  "water": {
+    "name": "水体识别",
+    "config": "work_dirs/segformer.b0.water/segformer.b0.water.py",
+    "checkpoint": "work_dirs/segformer.b0.water/latest.pth",
+    "input_dir": "data/water/images_png",
+    "output_dir": "outputs/water"
+  },
+  "snow": {
+    "name": "积雪识别",
+    "config": "work_dirs/segformer.b0.snow/segformer.b0.snow.py",
+    "checkpoint": "work_dirs/segformer.b0.snow/latest.pth",
+    "input_dir": "data/snow/images_png",
+    "output_dir": "outputs/snow"
+  }
+}

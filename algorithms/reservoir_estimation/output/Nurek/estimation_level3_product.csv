@@ -1,0 +1,3 @@
+sensor,date,level3_area_km2,level3_elevation_m,level3_storage_mcm
+landsat,2022-06-04,98.00000000000001,904.8,434.45
+sentinel,2022-06-04,98.00000000000001,904.8,434.45
