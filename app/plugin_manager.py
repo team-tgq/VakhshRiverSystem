@@ -9,8 +9,9 @@ class PluginManager:
         self.plugins = []
 
     def load_plugins(self):
+        self.plugins = []
 
-        for folder in os.listdir(PLUGIN_DIR):
+        for folder in sorted(os.listdir(PLUGIN_DIR)):
 
             if folder.startswith("__"):
                 continue
@@ -26,19 +27,18 @@ class PluginManager:
                 continue
 
             try:
-
-                module = importlib.import_module(
-                    f"{PLUGIN_DIR}.{folder}.plugin"
-                )
-
+                module = importlib.import_module(f"{PLUGIN_DIR}.{folder}.plugin")
                 plugin = module.Plugin()
-
                 self.plugins.append(plugin)
 
-                print("加载插件:", plugin.name())
+                order = plugin.order() if hasattr(plugin, "order") else 999
+                print(f"加载插件: {plugin.name()} (order={order})")
 
             except Exception as e:
-
                 print("插件加载失败:", folder, e)
+
+        self.plugins.sort(
+            key=lambda p: p.order() if hasattr(p, "order") else 999
+        )
 
         return self.plugins

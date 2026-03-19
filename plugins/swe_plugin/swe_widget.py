@@ -2,6 +2,7 @@ import os
 
 import geopandas as gpd
 import rasterio
+from matplotlib import ticker
 from rasterio.plot import plotting_extent
 
 from PyQt5.QtWidgets import (
@@ -14,11 +15,14 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from algorithms.swe import swe_assessment
+import numpy as np  # 记得在文件顶部添加这个导入
+import matplotlib.colors as colors # 记得添加这个导入
 
 
 class SWEMapCanvas(FigureCanvas):
     def __init__(self, parent=None):
-        self.figure = Figure()
+        # 使用 tight_layout 自动调整布局，防止标签被遮挡
+        self.figure = Figure(tight_layout=True)
         super().__init__(self.figure)
         self.setParent(parent)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -28,42 +32,74 @@ class SWEMapCanvas(FigureCanvas):
         self.figure.clear()
         ax = self.figure.add_subplot(111)
 
+        # 1. 读取数据
         with rasterio.open(tif_path) as src:
             arr = src.read(1).astype("float32")
             nodata = src.nodata
             if nodata is not None:
-                arr[arr == nodata] = float("nan")
+                arr[arr == nodata] = np.nan
             extent = plotting_extent(src)
             tif_crs = src.crs
 
-        im = ax.imshow(arr, extent=extent, origin="upper", alpha=0.78)
-        self.figure.colorbar(im, ax=ax, fraction=0.036, pad=0.04, label="SWE (cm)")
+        # 2. 数据清洗：积雪数据中 0 或负值会干扰对数拉伸，设为极小值或 NaN
+        arr_plot = np.where(arr <= 0.1, np.nan, arr)
+        valid_data = arr_plot[~np.isnan(arr_plot)]
 
+        if valid_data.size > 0:
+            # 自动计算显示范围：取 1% 到 99% 分位数，彻底干掉极端异常值
+            vmin, vmax = np.percentile(valid_data, [1, 99])
+            # 确保 vmin 为正数以适配 LogNorm
+            vmin = max(0.5, vmin)
+        else:
+            vmin, vmax = 1, 100
+
+        # 3. 核心：使用对数归一化 (LogNorm) 增强低值区的颜色对比
+        # 如果你觉得对数拉伸太夸张，可以换回 colors.Normalize(vmin=vmin, vmax=vmax)
+        norm = colors.LogNorm(vmin=vmin, vmax=vmax)
+
+        # 选择对比度极高的色带：'Spectral_r' (红黄蓝) 或 'RdYlBu_r'
+        cmap = 'Spectral_r'
+
+        # 4. 绘图
+        im = ax.imshow(arr_plot, extent=extent, origin="upper",
+                       cmap=cmap, norm=norm, alpha=1.0, interpolation='nearest')
+
+        # 5. 优化 Colorbar (对数刻度显示)
+        # 使用 LogLocator 自动生成 1, 10, 100, 1000 这样的科学刻度
+        cbar = self.figure.colorbar(im, ax=ax, fraction=0.035, pad=0.04)
+        cbar.set_label("SWE (cm) - Log Scaled", fontsize=10, fontweight='bold')
+        cbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter('%.0f'))
+
+        # 6. 叠加研究区矢量边界
         if study_area_shp and os.path.exists(study_area_shp):
-            gdf = gpd.read_file(study_area_shp)
-            if gdf.crs is not None and tif_crs is not None and gdf.crs != tif_crs:
-                gdf = gdf.to_crs(tif_crs)
-
             try:
-                gdf.boundary.plot(ax=ax, linewidth=1.8)
-            except Exception:
-                pass
+                gdf = gpd.read_file(study_area_shp)
+                if gdf.crs is not None and tif_crs is not None and gdf.crs != tif_crs:
+                    gdf = gdf.to_crs(tif_crs)
+                # 使用鲜艳的红色边界，线宽适中
+                gdf.boundary.plot(ax=ax, color='#e41a1c', linewidth=1.5, zorder=5)
+            except Exception as e:
+                print(f"Vector plot error: {e}")
 
-        # 可选在线底图
+        # 7. 叠加在线底图
         if use_basemap:
             try:
                 import contextily as ctx
-                if tif_crs is not None:
-                    ctx.add_basemap(ax, crs=tif_crs.to_string(), source=ctx.providers.OpenStreetMap.Mapnik)
-            except Exception:
-                pass
+                # 换一个更轻量的底图源，或者直接不传 CRS 试试（让它自动对齐）
+                ctx.add_basemap(ax, crs=src.crs, source=ctx.providers.CartoDB.Positron)
+                print("底图加载成功")
+            except Exception as e:
+                print(f"底图加载失败：{e}")  # 看看控制台报错是网络问题还是坐标系问题
 
-        ax.set_title(f"SWE Raster: {os.path.basename(tif_path)}")
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
-        ax.grid(False)
+        # 8. 图形细节美化
+        ax.set_title(f"Vakhsh Basin SWE Distribution\n({os.path.basename(tif_path)})",
+                     fontsize=12, pad=10)
+        ax.set_xlabel("Longitude (°E)", fontsize=9)
+        ax.set_ylabel("Latitude (°N)", fontsize=9)
 
-        self.figure.tight_layout()
+        # 移除默认网格，改用淡色虚线
+        ax.grid(True, which='both', linestyle='--', alpha=0.2, color='gray')
+
         self.draw()
 
 

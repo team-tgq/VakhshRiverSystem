@@ -16,7 +16,7 @@ from matplotlib.figure import Figure
 
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 
-from algorithms.flood import risk_assessment_6factors
+from algorithms.flood import risk_assessment_6factors_entropy
 
 
 class RasterCanvas(FigureCanvas):
@@ -112,7 +112,7 @@ class FloodWidget(QWidget):
     def run_analysis(self):
         try:
             self.log.append("开始运行洪涝风险评估...")
-            result = risk_assessment_6factors.run_risk_assessment()
+            result = risk_assessment_6factors_entropy.run_risk_assessment()
             self.result_paths = result
 
             self.log.append(f"风险栅格已生成: {result['risk_tif']}")
@@ -128,7 +128,7 @@ class FloodWidget(QWidget):
 
     def load_existing_results(self):
         try:
-            base_dir = os.path.dirname(risk_assessment_6factors.__file__)
+            base_dir = os.path.dirname(risk_assessment_6factors_entropy.__file__)
             risk_tif = os.path.join(base_dir, "outputs", "risk_6factors.tif")
             map_html = os.path.join(base_dir, "outputs", "flood_risk_map.html")
             study_area_shp = os.path.join(base_dir, "study_area.shp")

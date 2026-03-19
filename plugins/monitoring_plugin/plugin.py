@@ -7,5 +7,7 @@ class Plugin(BasePlugin):
     def name(self):
         return "水文监测系统"
 
+    def order(self):
+        return 1
     def widget(self):
         return MonitoringWidget()
