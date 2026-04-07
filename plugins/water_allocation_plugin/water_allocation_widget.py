@@ -33,6 +33,7 @@ from algorithms.water_allocation.core import (
     run_dam_scheduling_optimization,
     run_water_allocation_optimization,
 )
+from app.ui_hints import attach_hint, create_hint_badge, label_with_hint
 
 try:
     import matplotlib.pyplot as plt
@@ -100,18 +101,29 @@ class CropRowWidget(QWidget):
         self.yield_edit = QLineEdit("300")
         self.price_edit = QLineEdit("7.5")
 
+        crop_type_hint = "内容：作物类型。\n格式：从下拉框中选择。"
+        stage_hint = "内容：作物生育阶段。\n格式：从下拉框中选择。"
+        area_hint = "内容：该作物种植面积。\n格式：浮点数，单位万亩，例如 150。"
+        yield_hint = "内容：该作物亩产量。\n格式：浮点数，单位 kg/亩，例如 300。"
+        price_hint = "内容：该作物市场单价。\n格式：浮点数，单位 元/kg，例如 7.5。"
+        attach_hint(self.crop_type, crop_type_hint)
+        attach_hint(self.crop_stage, stage_hint)
+        attach_hint(self.area_edit, area_hint)
+        attach_hint(self.yield_edit, yield_hint)
+        attach_hint(self.price_edit, price_hint)
+
         remove_btn = QPushButton("删除")
         remove_btn.clicked.connect(lambda: self._remove_callback(self))
 
-        layout.addWidget(QLabel("作物"))
+        layout.addWidget(label_with_hint("作物", crop_type_hint, stretch=False))
         layout.addWidget(self.crop_type)
-        layout.addWidget(QLabel("生育期"))
+        layout.addWidget(label_with_hint("生育期", stage_hint, stretch=False))
         layout.addWidget(self.crop_stage)
-        layout.addWidget(QLabel("面积(万亩)"))
+        layout.addWidget(label_with_hint("面积(万亩)", area_hint, stretch=False))
         layout.addWidget(self.area_edit)
-        layout.addWidget(QLabel("产量(kg/亩)"))
+        layout.addWidget(label_with_hint("产量(kg/亩)", yield_hint, stretch=False))
         layout.addWidget(self.yield_edit)
-        layout.addWidget(QLabel("单价(元/kg)"))
+        layout.addWidget(label_with_hint("单价(元/kg)", price_hint, stretch=False))
         layout.addWidget(self.price_edit)
         layout.addWidget(remove_btn)
 
@@ -142,20 +154,21 @@ class MeteoDialog(QDialog):
 
         form = QFormLayout(self)
         rows = [
-            ("Rn", "太阳净辐射 Rn (mm/d)"),
-            ("G", "土壤热通量 G (MJ/m²)"),
-            ("T", "地表日平均气温 T (℃)"),
-            ("u2", "2m 风速 u2 (m/s)"),
-            ("es", "饱和水汽压 es (hPa)"),
-            ("ea", "实际水汽压 ea (hPa)"),
-            ("delta", "水汽压变化率 δ"),
-            ("gamma", "湿度计常数 γ"),
+            ("Rn", "太阳净辐射 Rn (mm/d)", "内容：太阳净辐射。\n格式：浮点数，单位 mm/d，例如 10.0。"),
+            ("G", "土壤热通量 G (MJ/m²)", "内容：土壤热通量。\n格式：浮点数，单位 MJ/m²，例如 0.0。"),
+            ("T", "地表日平均气温 T (℃)", "内容：地表日平均气温。\n格式：浮点数，单位 ℃，例如 20.0。"),
+            ("u2", "2m 风速 u2 (m/s)", "内容：2 米高度风速。\n格式：浮点数，单位 m/s，例如 2.0。"),
+            ("es", "饱和水汽压 es (hPa)", "内容：饱和水汽压。\n格式：浮点数，单位 hPa，例如 23.4。"),
+            ("ea", "实际水汽压 ea (hPa)", "内容：实际水汽压。\n格式：浮点数，单位 hPa，例如 15.0。"),
+            ("delta", "水汽压变化率 δ", "内容：水汽压曲线斜率。\n格式：浮点数，例如 1.45。"),
+            ("gamma", "湿度计常数 γ", "内容：湿度计常数。\n格式：浮点数，例如 0.66。"),
         ]
 
-        for key, label in rows:
+        for key, label, hint in rows:
             edit = QLineEdit(str(params[key]))
             self._entries[key] = edit
-            form.addRow(label, edit)
+            attach_hint(edit, hint)
+            form.addRow(label_with_hint(label, hint), edit)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -237,9 +250,24 @@ class WaterAllocationWidget(QWidget):
         self.month_combo.currentIndexChanged.connect(lambda: self.calculate_et0_and_demands(silent=True))
         self.w_surface_edit = QLineEdit("850")
         self.w_ground_edit = QLineEdit("70")
-        global_form.addRow("选择月份", self.month_combo)
-        global_form.addRow("大坝当月可供水量(百万m³)", self.w_surface_edit)
-        global_form.addRow("区域当月可供其他水(百万m³)", self.w_ground_edit)
+        self._add_form_input(
+            global_form,
+            "选择月份",
+            self.month_combo,
+            "内容：进行需水估算与分配的目标月份。\n格式：1-12 的整数，下拉选择。",
+        )
+        self._add_form_input(
+            global_form,
+            "大坝当月可供水量(百万m³)",
+            self.w_surface_edit,
+            "内容：大坝当月可供地表水。\n格式：浮点数，单位百万 m³，例如 850。",
+        )
+        self._add_form_input(
+            global_form,
+            "区域当月可供其他水(百万m³)",
+            self.w_ground_edit,
+            "内容：区域当月可供其他水源总量。\n格式：浮点数，单位百万 m³，例如 70。",
+        )
         body.addWidget(global_box)
 
         base_box = QGroupBox("基础与水文参数")
@@ -253,14 +281,14 @@ class WaterAllocationWidget(QWidget):
         self.eco_edit = QLineEdit("5")
         self.et0_edit = QLineEdit("0.0")
         self.et0_edit.setReadOnly(True)
-        base_form.addRow("人口(万人)", self.pop_edit)
-        base_form.addRow("城镇化率(%)", self.urban_edit)
-        base_form.addRow("当地GDP(亿元)", self.gdp_edit)
-        base_form.addRow("工业重复利用率(%)", self.reuse_edit)
-        base_form.addRow("灌溉利用系数", self.eff_edit)
-        base_form.addRow("传输损耗率(%)", self.loss_edit)
-        base_form.addRow("生态保底水(百万m³)", self.eco_edit)
-        base_form.addRow("日ET0(mm/天)", self.et0_edit)
+        self._add_form_input(base_form, "人口(万人)", self.pop_edit, "内容：区域总人口。\n格式：浮点数，单位万人，例如 387。")
+        self._add_form_input(base_form, "城镇化率(%)", self.urban_edit, "内容：城镇化水平。\n格式：0-100 的浮点数百分比，例如 23。")
+        self._add_form_input(base_form, "当地GDP(亿元)", self.gdp_edit, "内容：地区生产总值。\n格式：浮点数，单位亿元，例如 82。")
+        self._add_form_input(base_form, "工业重复利用率(%)", self.reuse_edit, "内容：工业用水重复利用率。\n格式：0-100 的浮点数百分比，例如 25。")
+        self._add_form_input(base_form, "灌溉利用系数", self.eff_edit, "内容：灌溉利用效率系数。\n格式：0-1 之间浮点数，例如 0.55。")
+        self._add_form_input(base_form, "传输损耗率(%)", self.loss_edit, "内容：输水过程损耗比例。\n格式：0-100 的浮点数百分比，例如 12。")
+        self._add_form_input(base_form, "生态保底水(百万m³)", self.eco_edit, "内容：生态用水下限。\n格式：浮点数，单位百万 m³，例如 5。")
+        self._add_form_input(base_form, "日ET0(mm/天)", self.et0_edit, "内容：日参考蒸散发 ET0（自动计算）。\n格式：浮点数，单位 mm/天。")
         meteo_btn = QPushButton("配置气象参数并计算 ET0")
         meteo_btn.clicked.connect(self.open_meteo_config)
         base_form.addRow(meteo_btn)
@@ -271,9 +299,9 @@ class WaterAllocationWidget(QWidget):
         self.hydro_pmax_edit = QLineEdit("335")
         self.hydro_qmax_edit = QLineEdit("146")
         self.hydro_price_edit = QLineEdit("0.4")
-        hydro_form.addRow("单机最大功率(MW)", self.hydro_pmax_edit)
-        hydro_form.addRow("单机最大流量(m³/s)", self.hydro_qmax_edit)
-        hydro_form.addRow("上网电价(元/kWh)", self.hydro_price_edit)
+        self._add_form_input(hydro_form, "单机最大功率(MW)", self.hydro_pmax_edit, "内容：单机最大装机功率。\n格式：浮点数，单位 MW，例如 335。")
+        self._add_form_input(hydro_form, "单机最大流量(m³/s)", self.hydro_qmax_edit, "内容：单机最大过机流量。\n格式：浮点数，单位 m³/s，例如 146。")
+        self._add_form_input(hydro_form, "上网电价(元/kWh)", self.hydro_price_edit, "内容：发电上网电价。\n格式：浮点数，单位元/kWh，例如 0.4。")
         body.addWidget(hydro_box)
 
         crop_box = QGroupBox("农业作物动态配置")
@@ -303,7 +331,12 @@ class WaterAllocationWidget(QWidget):
         for sec in self.sectors:
             edit = QLineEdit("0.0")
             self.demand_edits[sec] = edit
-            demand_form.addRow(f"{sec}需水(百万m³)", edit)
+            self._add_form_input(
+                demand_form,
+                f"{sec}需水(百万m³)",
+                edit,
+                f"内容：{sec}部门当月需水量。\n格式：浮点数，单位百万 m³，例如 120.5。",
+            )
         recalc_btn = QPushButton("重新估算需水")
         recalc_btn.clicked.connect(lambda: self.calculate_et0_and_demands(silent=False))
         demand_form.addRow(recalc_btn)
@@ -314,9 +347,9 @@ class WaterAllocationWidget(QWidget):
         self.w_econ_edit = QLineEdit("0.33")
         self.w_short_edit = QLineEdit("0.33")
         self.w_gini_edit = QLineEdit("0.34")
-        weight_form.addRow("整体经济权重", self.w_econ_edit)
-        weight_form.addRow("降低缺水权重", self.w_short_edit)
-        weight_form.addRow("部门公平(Gini)权重", self.w_gini_edit)
+        self._add_form_input(weight_form, "整体经济权重", self.w_econ_edit, "内容：经济目标权重。\n格式：0-1 之间浮点数，建议三项权重和约为 1。")
+        self._add_form_input(weight_form, "降低缺水权重", self.w_short_edit, "内容：缺水惩罚目标权重。\n格式：0-1 之间浮点数，建议三项权重和约为 1。")
+        self._add_form_input(weight_form, "部门公平(Gini)权重", self.w_gini_edit, "内容：公平性目标权重。\n格式：0-1 之间浮点数，建议三项权重和约为 1。")
         body.addWidget(weight_box)
 
         run_btn = QPushButton("启动部门分配分析 (NSGA-II)")
@@ -358,6 +391,8 @@ class WaterAllocationWidget(QWidget):
         path_layout = QHBoxLayout(path_box)
         self.data_path_edit = QLineEdit("")
         self.data_path_edit.setPlaceholderText("可选：csv/nc 文件或包含 nc 的目录，留空将使用内置数据")
+        data_path_hint = "内容：外部气象/水文数据源路径。\n格式：csv 或 nc 文件路径，或包含 nc 文件的目录；留空使用内置数据。"
+        attach_hint(self.data_path_edit, data_path_hint)
         choose_file_btn = QPushButton("选择文件")
         choose_dir_btn = QPushButton("选择目录")
         clear_btn = QPushButton("清空")
@@ -365,6 +400,7 @@ class WaterAllocationWidget(QWidget):
         choose_dir_btn.clicked.connect(self.select_data_dir)
         clear_btn.clicked.connect(lambda: self.data_path_edit.setText(""))
         path_layout.addWidget(self.data_path_edit)
+        path_layout.addWidget(create_hint_badge(data_path_hint))
         path_layout.addWidget(choose_file_btn)
         path_layout.addWidget(choose_dir_btn)
         path_layout.addWidget(clear_btn)
@@ -375,9 +411,24 @@ class WaterAllocationWidget(QWidget):
         self.v_init_edit = QLineEdit("84.0")
         self.nsga3_pop_edit = QLineEdit("100")
         self.nsga3_gen_edit = QLineEdit("200")
-        params_form.addRow("月初初始蓄水量(亿m³)", self.v_init_edit)
-        params_form.addRow("种群规模", self.nsga3_pop_edit)
-        params_form.addRow("迭代代数", self.nsga3_gen_edit)
+        self._add_form_input(
+            params_form,
+            "月初初始蓄水量(亿m³)",
+            self.v_init_edit,
+            "内容：调度起始库容。\n格式：浮点数，单位亿 m³，例如 84.0。",
+        )
+        self._add_form_input(
+            params_form,
+            "种群规模",
+            self.nsga3_pop_edit,
+            "内容：NSGA-III 优化种群规模。\n格式：正整数，例如 100。",
+        )
+        self._add_form_input(
+            params_form,
+            "迭代代数",
+            self.nsga3_gen_edit,
+            "内容：NSGA-III 优化迭代代数。\n格式：正整数，例如 200。",
+        )
         layout.addWidget(params_box)
 
         run_btn = QPushButton("开始运行 NSGA-III")
@@ -401,6 +452,10 @@ class WaterAllocationWidget(QWidget):
         result_layout.addLayout(result_btn_row)
         layout.addWidget(result_box)
         layout.addStretch()
+
+    def _add_form_input(self, form_layout: QFormLayout, label_text: str, widget: QWidget, hint_text: str):
+        form_layout.addRow(label_with_hint(label_text, hint_text), widget)
+        attach_hint(widget, hint_text)
 
     def _to_float(self, edit: QLineEdit, name: str) -> float:
         try:

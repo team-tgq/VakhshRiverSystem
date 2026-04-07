@@ -11,19 +11,22 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
     QMessageBox,
-    QTextEdit
+    QTextEdit,
+    QSizePolicy,
 )
 from PyQt5.QtGui import QPixmap, QImage
 from PyQt5.QtCore import Qt
 
 from algorithms.inundation_monitoring.predictor import FloodPredictor
+from app.ui_hints import attach_hint, create_hint_badge, label_with_hint
 
 
 class ImageLabel(QLabel):
     def __init__(self, text="No Image"):
         super().__init__(text)
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(420, 320)
+        self.setMinimumSize(260, 200)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet("background:#f0f0f0;border:1px solid #ccc;")
         self._pix = None
 
@@ -67,10 +70,11 @@ class InundationMonitoringWidget(QWidget):
 
         # 阈值输入
         thresh_layout = QHBoxLayout()
-        thresh_label = QLabel("淹没区识别阈值")
         self.thresh_input = QLineEdit("0.5")
+        thresh_hint = "内容：淹没区概率阈值。\n格式：0 到 1 之间浮点数，例如 0.5。"
+        attach_hint(self.thresh_input, thresh_hint)
 
-        thresh_layout.addWidget(thresh_label)
+        thresh_layout.addWidget(label_with_hint("淹没区识别阈值", thresh_hint, stretch=False))
         thresh_layout.addWidget(self.thresh_input)
         layout.addLayout(thresh_layout)
 
@@ -79,6 +83,11 @@ class InundationMonitoringWidget(QWidget):
 
         self.btn_select = QPushButton("选择SAR影像")
         self.btn_select.clicked.connect(self.select_image)
+        sar_hint = (
+            "内容：用于淹没识别的 SAR 雷达影像（合成孔径雷达）。\n"
+            "格式：.tif/.tiff；建议为单波段灰度强度图，影像已做基础几何校正。"
+        )
+        attach_hint(self.btn_select, sar_hint)
 
         self.btn_open_overlay = QPushButton("打开结果图")
         self.btn_open_overlay.clicked.connect(self.open_overlay_file)
@@ -87,10 +96,16 @@ class InundationMonitoringWidget(QWidget):
         self.btn_open_mask.clicked.connect(self.open_mask_file)
 
         btn_layout.addWidget(self.btn_select)
+        btn_layout.addWidget(create_hint_badge(sar_hint))
         btn_layout.addWidget(self.btn_open_overlay)
         btn_layout.addWidget(self.btn_open_mask)
 
         layout.addLayout(btn_layout)
+
+        sar_desc = QLabel("SAR 影像说明：SAR 是雷达遥感影像（非普通可见光照片），请优先选择 .tif/.tiff 数据。")
+        sar_desc.setWordWrap(True)
+        sar_desc.setStyleSheet("color:#555;font-size:12px;")
+        layout.addWidget(sar_desc)
 
         # 图像显示
         img_layout = QHBoxLayout()
@@ -98,8 +113,8 @@ class InundationMonitoringWidget(QWidget):
         self.label_orig = ImageLabel("原图")
         self.label_result = ImageLabel("识别结果图")
 
-        img_layout.addWidget(self.label_orig)
-        img_layout.addWidget(self.label_result)
+        img_layout.addWidget(self.label_orig, 1)
+        img_layout.addWidget(self.label_result, 1)
 
         layout.addLayout(img_layout)
 

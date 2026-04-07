@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFileDialog, QMessageBox, QGroupBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QProgressBar, QDialog,
-    QTextEdit, QStackedWidget, QFormLayout, QGridLayout
+    QTextEdit, QStackedWidget, QFormLayout, QGridLayout, QSizePolicy
 )
 from PyQt5.QtGui import QPixmap, QFont, QDoubleValidator
 from PyQt5.QtCore import Qt
@@ -29,6 +29,7 @@ from algorithms.monitoring.engine import (
     predict_number
 )
 from algorithms.monitoring.engine.waterSpeed import calculate_velocity_for_ui
+from app.ui_hints import attach_hint, create_hint_badge, label_with_hint
 
 
 THEME_COLOR = "#0078d7"
@@ -93,7 +94,7 @@ class AnalysisDialog(QDialog):
 
     def init_evaluation_panel(self, parent_layout):
         gb_eval = QGroupBox("当前水位智能评价")
-        gb_eval.setFixedHeight(220)
+        gb_eval.setMinimumHeight(220)
         layout = QHBoxLayout()
 
         status_widget = QWidget()
@@ -192,7 +193,7 @@ class AnalysisDialog(QDialog):
             max_lvl, min_lvl, avg_lvl = 0, 0, 0
 
         stats_panel = QWidget()
-        stats_panel.setFixedWidth(200)
+        stats_panel.setMinimumWidth(180)
         stats_layout = QVBoxLayout(stats_panel)
         stats_layout.setSpacing(15)
 
@@ -256,16 +257,10 @@ class MonitoringWidget(QWidget):
 
     def init_sidebar(self):
         sidebar = QWidget()
-        sidebar.setFixedWidth(200)
+        sidebar.setMinimumWidth(180)
         sidebar.setStyleSheet("background-color: #ffffff; border-right: 1px solid #d1d9e6;")
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(0, 20, 0, 0)
-
-        title = QLabel(" 水文智能分析")
-        title.setFont(QFont("Microsoft YaHei", 15, QFont.Bold))
-        title.setStyleSheet("color: #0078d7; padding: 10px; border:none;")
-        layout.addWidget(title)
-        layout.addSpacing(20)
 
         self.nav_btns = []
         btn_data = [("🌊 水位实时监测", 0), ("🎥 表面流速测算", 1), ("📊 综合流量推算", 2)]
@@ -301,7 +296,7 @@ class MonitoringWidget(QWidget):
         layout.setSpacing(15)
 
         control_panel = QGroupBox("系统控制")
-        control_panel.setFixedWidth(230)
+        control_panel.setMinimumWidth(230)
         c_layout = QVBoxLayout(control_panel)
         c_layout.setContentsMargins(15, 25, 15, 15)
         c_layout.setSpacing(15)
@@ -310,6 +305,11 @@ class MonitoringWidget(QWidget):
         self.btn_upload.setMinimumHeight(45)
         self.btn_upload.setStyleSheet("background-color: #28a745; font-size: 14px; border-radius: 6px;")
         self.btn_upload.clicked.connect(self.start_level_process)
+        level_image_hint = (
+            "内容：用于水位识别的原始水尺图像。\n"
+            "格式：jpg/png/bmp 单张图像；建议包含完整刻度与当前水线，画面清晰、无遮挡。"
+        )
+        attach_hint(self.btn_upload, level_image_hint)
 
         self.btn_download = QPushButton("💾 保存数据")
         self.btn_download.setMinimumHeight(40)
@@ -331,7 +331,15 @@ class MonitoringWidget(QWidget):
         self.info_log_level.setReadOnly(True)
         self.info_log_level.setText("系统就绪...")
 
-        c_layout.addWidget(self.btn_upload)
+        upload_row = QHBoxLayout()
+        upload_row.addWidget(self.btn_upload)
+        upload_row.addWidget(create_hint_badge(level_image_hint))
+        upload_row.addStretch(1)
+        c_layout.addLayout(upload_row)
+        level_tip = QLabel("输入图像：请上传包含水尺刻度与当前水线的清晰单张图（jpg/png/bmp）。")
+        level_tip.setWordWrap(True)
+        level_tip.setStyleSheet("color:#5f6b7a;font-size:12px;")
+        c_layout.addWidget(level_tip)
         c_layout.addWidget(self.btn_download)
         c_layout.addWidget(self.btn_analysis)
         c_layout.addSpacing(15)
@@ -340,28 +348,19 @@ class MonitoringWidget(QWidget):
         c_layout.addWidget(QLabel("运行日志:"))
         c_layout.addWidget(self.info_log_level, 1)
 
-        total_display_width = 860
         display_panel = QWidget()
-        display_panel.setFixedWidth(total_display_width)
         display_v_layout = QVBoxLayout(display_panel)
         display_v_layout.setContentsMargins(0, 0, 0, 0)
         display_v_layout.setSpacing(10)
 
-        top_spacing = 10
-        top_img_w = int((total_display_width - top_spacing) / 2)
-        top_img_h = 280
         top_row_layout = QHBoxLayout()
-        top_row_layout.setSpacing(top_spacing)
+        top_row_layout.setSpacing(10)
 
-        box_origin, self.lbl_origin = self.create_image_box("原始图像 (Input)", top_img_w, top_img_h + 100)
-        box_seg, self.lbl_seg = self.create_image_box("分割结果 (Mask)", top_img_w, top_img_h + 100)
-        top_row_layout.addWidget(box_origin)
-        top_row_layout.addWidget(box_seg)
+        box_origin, self.lbl_origin = self.create_image_box("原始图像 (Input)", min_height=320)
+        box_seg, self.lbl_seg = self.create_image_box("分割结果 (Mask)", min_height=320)
+        top_row_layout.addWidget(box_origin, 1)
+        top_row_layout.addWidget(box_seg, 1)
         display_v_layout.addLayout(top_row_layout)
-
-        bottom_spacing = 10
-        bottom_img_w = int((total_display_width - (4 * bottom_spacing)) / 5)
-        bottom_img_h = 360
 
         gb_process = QGroupBox("图像处理流水线")
         gb_process.setStyleSheet(
@@ -370,25 +369,25 @@ class MonitoringWidget(QWidget):
         )
 
         bottom_row_layout = QHBoxLayout()
-        bottom_row_layout.setSpacing(bottom_spacing)
+        bottom_row_layout.setSpacing(10)
         bottom_row_layout.setContentsMargins(10, 25, 10, 10)
 
-        box_str, self.lbl_straight = self.create_image_box("1. 旋正", bottom_img_w, bottom_img_h)
-        box_enh, self.lbl_enhance = self.create_image_box("2. 增强", bottom_img_w, bottom_img_h)
-        box_den, self.lbl_denoise = self.create_image_box("3. 去噪", bottom_img_w, bottom_img_h)
-        box_det, self.lbl_detect = self.create_image_box("4. 识别", bottom_img_w, bottom_img_h)
-        box_fin, self.lbl_final = self.create_image_box("5. 结果", bottom_img_w, bottom_img_h)
+        box_str, self.lbl_straight = self.create_image_box("1. 旋正", min_height=240)
+        box_enh, self.lbl_enhance = self.create_image_box("2. 增强", min_height=240)
+        box_den, self.lbl_denoise = self.create_image_box("3. 去噪", min_height=240)
+        box_det, self.lbl_detect = self.create_image_box("4. 识别", min_height=240)
+        box_fin, self.lbl_final = self.create_image_box("5. 结果", min_height=240)
 
-        bottom_row_layout.addWidget(box_str)
-        bottom_row_layout.addWidget(box_enh)
-        bottom_row_layout.addWidget(box_den)
-        bottom_row_layout.addWidget(box_det)
-        bottom_row_layout.addWidget(box_fin)
+        bottom_row_layout.addWidget(box_str, 1)
+        bottom_row_layout.addWidget(box_enh, 1)
+        bottom_row_layout.addWidget(box_den, 1)
+        bottom_row_layout.addWidget(box_det, 1)
+        bottom_row_layout.addWidget(box_fin, 1)
         gb_process.setLayout(bottom_row_layout)
         display_v_layout.addWidget(gb_process)
 
         data_panel = QGroupBox("数据分析中心")
-        data_panel.setFixedWidth(420)
+        data_panel.setMinimumWidth(320)
         d_layout = QVBoxLayout(data_panel)
         d_layout.setContentsMargins(15, 25, 15, 15)
         d_layout.setSpacing(20)
@@ -430,9 +429,9 @@ class MonitoringWidget(QWidget):
         gb_calc.setLayout(gb_calc_layout)
         d_layout.addWidget(gb_calc)
 
-        layout.addWidget(control_panel)
-        layout.addWidget(display_panel)
-        layout.addWidget(data_panel)
+        layout.addWidget(control_panel, 2)
+        layout.addWidget(display_panel, 6)
+        layout.addWidget(data_panel, 3)
         self.stack.addWidget(page)
 
     def init_speed_page(self):
@@ -442,7 +441,7 @@ class MonitoringWidget(QWidget):
         layout.setSpacing(15)
 
         control_panel = QGroupBox("流速系统控制")
-        control_panel.setFixedWidth(230)
+        control_panel.setMinimumWidth(230)
         c_layout = QVBoxLayout(control_panel)
         c_layout.setContentsMargins(15, 25, 15, 15)
 
@@ -450,6 +449,11 @@ class MonitoringWidget(QWidget):
         self.btn_speed_upload.setMinimumHeight(45)
         self.btn_speed_upload.setStyleSheet("background-color: #17a2b8; font-size: 14px; border-radius: 6px;")
         self.btn_speed_upload.clicked.connect(self.start_speed_process)
+        speed_video_hint = (
+            "内容：用于表面流速计算的河道视频。\n"
+            "格式：mp4/avi/mov；建议固定机位、画面稳定、河面纹理清晰。"
+        )
+        attach_hint(self.btn_speed_upload, speed_video_hint)
 
         self.lbl_speed_value = QLabel("表面流速\n-- m/s")
         self.lbl_speed_value.setFont(QFont("Arial", 20, QFont.Bold))
@@ -462,7 +466,11 @@ class MonitoringWidget(QWidget):
         self.info_log_speed.setReadOnly(True)
         self.info_log_speed.setText("光流法引擎已就绪...\n等待输入视频数据。")
 
-        c_layout.addWidget(self.btn_speed_upload)
+        speed_upload_row = QHBoxLayout()
+        speed_upload_row.addWidget(self.btn_speed_upload)
+        speed_upload_row.addWidget(create_hint_badge(speed_video_hint))
+        speed_upload_row.addStretch(1)
+        c_layout.addLayout(speed_upload_row)
         c_layout.addWidget(self.lbl_speed_value)
         c_layout.addStretch()
         c_layout.addWidget(QLabel("运算日志:"))
@@ -488,8 +496,8 @@ class MonitoringWidget(QWidget):
             self.img_labels_speed.append(img_lbl)
             grid_layout.addLayout(vbox, i // 2, i % 2)
 
-        layout.addWidget(control_panel)
-        layout.addWidget(display_panel, 1)
+        layout.addWidget(control_panel, 2)
+        layout.addWidget(display_panel, 6)
         self.stack.addWidget(page)
 
     def init_flow_page(self):
@@ -538,6 +546,13 @@ class MonitoringWidget(QWidget):
         self.input_velocity.setMinimumHeight(55)
         self.input_velocity.setStyleSheet(input_style)
 
+        width_hint = "内容：实测河道水面宽度。\n格式：浮点数，单位 m，例如 15.5。"
+        depth_hint = "内容：实测河道水深。\n格式：浮点数，单位 dm，例如 2.3。"
+        velocity_hint = "内容：表面中心流速。\n格式：浮点数，单位 m/s，例如 1.28。"
+        attach_hint(self.input_width, width_hint)
+        attach_hint(self.input_depth, depth_hint)
+        attach_hint(self.input_velocity, velocity_hint)
+
         font_lbl = QFont("Microsoft YaHei", 16, QFont.Bold)
         lbl_w = QLabel("实测水面宽度 (m) :")
         lbl_w.setFont(font_lbl)
@@ -546,9 +561,9 @@ class MonitoringWidget(QWidget):
         lbl_v = QLabel("表面中心流速 (m/s):")
         lbl_v.setFont(font_lbl)
 
-        form_layout.addRow(lbl_w, self.input_width)
-        form_layout.addRow(lbl_d, self.input_depth)
-        form_layout.addRow(lbl_v, self.input_velocity)
+        form_layout.addRow(label_with_hint(lbl_w, width_hint), self.input_width)
+        form_layout.addRow(label_with_hint(lbl_d, depth_hint), self.input_depth)
+        form_layout.addRow(label_with_hint(lbl_v, velocity_hint), self.input_velocity)
 
         c_layout.addLayout(form_layout)
         c_layout.addSpacing(40)
@@ -785,7 +800,7 @@ class MonitoringWidget(QWidget):
         except ValueError:
             QMessageBox.warning(self, "数据错误", "请输入有效数字。")
 
-    def create_image_box(self, title, width, height):
+    def create_image_box(self, title, min_height=220):
         container = QWidget()
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -796,11 +811,12 @@ class MonitoringWidget(QWidget):
 
         lbl_img = QLabel("No Data")
         lbl_img.setAlignment(Qt.AlignCenter)
-        lbl_img.setFixedSize(width, height)
+        lbl_img.setMinimumHeight(min_height)
+        lbl_img.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         lbl_img.setStyleSheet("background-color: #e9ecef; border: 1px solid #ced4da; border-radius: 4px; color: #adb5bd;")
 
         layout.addWidget(lbl_title)
-        layout.addWidget(lbl_img)
+        layout.addWidget(lbl_img, 1)
         return container, lbl_img
 
     def update_image(self, label_obj, path):

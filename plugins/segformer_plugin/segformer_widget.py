@@ -2,20 +2,22 @@ import os
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFileDialog, QTextEdit, QMessageBox, QComboBox, QLineEdit
+    QFileDialog, QTextEdit, QMessageBox, QComboBox, QLineEdit, QSizePolicy
 )
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt
 
 from algorithms.segformer_service.service_config import TASKS
 from algorithms.segformer_service.service_runner import run_segformer_service
+from app.ui_hints import attach_hint, label_with_hint
 
 
 class ImageLabel(QLabel):
     def __init__(self, text="No Image"):
         super().__init__(text)
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(420, 320)
+        self.setMinimumSize(260, 200)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet("background:#f0f0f0;border:1px solid #ccc;")
         self._pix = None
 
@@ -56,18 +58,22 @@ class SegFormerWidget(QWidget):
         layout.addWidget(title)
 
         task_row = QHBoxLayout()
-        task_row.addWidget(QLabel("任务:"))
+        task_hint = "内容：分割任务类型。\n格式：下拉选择，当前支持 water / snow。"
+        task_row.addWidget(label_with_hint("任务:", task_hint, stretch=False))
 
         self.task_combo = QComboBox()
         self.task_combo.addItem("水体识别", "water")
         self.task_combo.addItem("积雪识别", "snow")
         self.task_combo.currentIndexChanged.connect(self.on_task_changed)
+        attach_hint(self.task_combo, task_hint)
 
         self.device_combo = QComboBox()
         self.device_combo.addItems(["cpu", "cuda:0"])
+        device_hint = "内容：推理设备。\n格式：下拉选择，cpu 或 cuda:0。"
+        attach_hint(self.device_combo, device_hint)
 
         task_row.addWidget(self.task_combo)
-        task_row.addWidget(QLabel("设备:"))
+        task_row.addWidget(label_with_hint("设备:", device_hint, stretch=False))
         task_row.addWidget(self.device_combo)
         task_row.addStretch()
 
@@ -76,9 +82,11 @@ class SegFormerWidget(QWidget):
         path_row = QHBoxLayout()
         self.image_edit = QLineEdit()
         self.image_edit.setReadOnly(True)
+        image_hint = "内容：输入影像文件路径。\n格式：png/jpg/jpeg/bmp 文件路径（通过“选择输入图片”填写）。"
+        attach_hint(self.image_edit, image_hint)
         self.image_btn = QPushButton("选择输入图片")
         self.image_btn.clicked.connect(self.select_image)
-        path_row.addWidget(QLabel("图片:"))
+        path_row.addWidget(label_with_hint("图片:", image_hint, stretch=False))
         path_row.addWidget(self.image_edit, 1)
         path_row.addWidget(self.image_btn)
         layout.addLayout(path_row)
@@ -95,8 +103,8 @@ class SegFormerWidget(QWidget):
         img_row = QHBoxLayout()
         self.input_label = ImageLabel("输入图")
         self.result_label = ImageLabel("结果图")
-        img_row.addWidget(self.input_label)
-        img_row.addWidget(self.result_label)
+        img_row.addWidget(self.input_label, 1)
+        img_row.addWidget(self.result_label, 1)
         layout.addLayout(img_row)
 
         self.log = QTextEdit()

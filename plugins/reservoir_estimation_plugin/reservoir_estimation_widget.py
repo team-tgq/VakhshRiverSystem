@@ -18,6 +18,7 @@ from matplotlib.figure import Figure
 
 from algorithms.reservoir_estimation.main_v import run_estimation
 from algorithms.reservoir_estimation.reservoir_config import RESERVOIR_CONFIGS
+from app.ui_hints import attach_hint, label_with_hint
 
 
 class MapCanvas(FigureCanvas):
@@ -89,8 +90,10 @@ class ReservoirEstimationWidget(QWidget):
 
         self.name_combo = QComboBox()
         self.name_combo.addItems(list(RESERVOIR_CONFIGS.keys()))
+        name_hint = "内容：待估算水库名称。\n格式：从下拉列表选择。"
+        attach_hint(self.name_combo, name_hint)
 
-        name_layout.addWidget(name_label)
+        name_layout.addWidget(label_with_hint(name_label, name_hint, stretch=False))
         name_layout.addWidget(self.name_combo)
         layout.addLayout(name_layout)
 
@@ -102,8 +105,10 @@ class ReservoirEstimationWidget(QWidget):
         self.start_input.setCalendarPopup(True)
         self.start_input.setDisplayFormat("yyyy-MM-dd")
         self.start_input.setDate(QDate(2022, 6, 1))
+        start_hint = "内容：估算起始日期。\n格式：yyyy-MM-dd，例如 2022-06-01。"
+        attach_hint(self.start_input, start_hint)
 
-        start_layout.addWidget(start_label)
+        start_layout.addWidget(label_with_hint(start_label, start_hint, stretch=False))
         start_layout.addWidget(self.start_input)
         layout.addLayout(start_layout)
 
@@ -115,8 +120,10 @@ class ReservoirEstimationWidget(QWidget):
         self.end_input.setCalendarPopup(True)
         self.end_input.setDisplayFormat("yyyy-MM-dd")
         self.end_input.setDate(QDate(2022, 6, 7))
+        end_hint = "内容：估算结束日期。\n格式：yyyy-MM-dd，例如 2022-06-07。"
+        attach_hint(self.end_input, end_hint)
 
-        end_layout.addWidget(end_label)
+        end_layout.addWidget(label_with_hint(end_label, end_hint, stretch=False))
         end_layout.addWidget(self.end_input)
         layout.addLayout(end_layout)
 
