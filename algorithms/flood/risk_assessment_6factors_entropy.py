@@ -13,6 +13,11 @@ import folium
 from folium.raster_layers import ImageOverlay
 from branca.colormap import linear
 
+try:
+    from .input_resolver import resolve_flood_input_paths
+except ImportError:
+    from input_resolver import resolve_flood_input_paths  # type: ignore
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -274,11 +279,25 @@ def build_folium_map(risk, dem_path, study_area_shp, out_map):
     m.save(out_map)
 
 
-def run_risk_assessment():
-    dem_path = os.path.join(CFG["proc_dir"], "dem_clip.tif")
-    rain_path = os.path.join(CFG["proc_dir"], "rain_mm_demgrid.tif")
-    soil_path = os.path.join(CFG["proc_dir"], "soil_moist_demgrid.tif")
-    lc_path = os.path.join(CFG["proc_dir"], "landcover_demgrid.tif")
+def run_risk_assessment(
+    target_date=None,
+    auto_prepare_static=True,
+    allow_legacy_dynamic=True,
+    auto_prepare_dynamic=True,
+):
+    input_paths = resolve_flood_input_paths(
+        CFG,
+        target_date=target_date,
+        auto_prepare_static=auto_prepare_static,
+        allow_legacy_dynamic=allow_legacy_dynamic,
+        auto_prepare_dynamic=auto_prepare_dynamic,
+    )
+
+    dem_path = input_paths["dem_path"]
+    rain_path = input_paths["rain_path"]
+    soil_path = input_paths["soil_path"]
+    lc_path = input_paths["landcover_path"]
+    rivers_path = input_paths["rivers_path"]
 
     dem, profile, transform, crs = read_raster(dem_path)
     rain, _, _, _ = read_raster(rain_path)
@@ -298,9 +317,7 @@ def run_risk_assessment():
     soil_norm = minmax_norm(soil)
     land_imperv = minmax_norm(landcover_to_impervious_factor(lc))
 
-    rivers = gpd.read_file(
-        os.path.join(CFG["raw_dir"], "hydrorivers.gpkg")
-    ).to_crs(crs)
+    rivers = gpd.read_file(rivers_path).to_crs(crs)
 
     river_mask = rasterize_rivers_to_mask(rivers, dem.shape, transform)
     dist = distance_to_river_m(river_mask, transform)
@@ -358,7 +375,7 @@ def run_risk_assessment():
     build_folium_map(
         risk=risk,
         dem_path=dem_path,
-        study_area_shp=CFG["study_area_shp"],
+        study_area_shp=input_paths["study_area_shp"],
         out_map=CFG["out_map"]
     )
     print("[Saved]", CFG["out_map"])
@@ -370,8 +387,18 @@ def run_risk_assessment():
         "subjective_weights": subjective_weights,
         "entropy_weights": entropy_weights,
         "final_weights": final_weights,
-        "study_area_shp": CFG["study_area_shp"],
+        "study_area_shp": input_paths["study_area_shp"],
         "dem_path": dem_path,
+        "landcover_path": lc_path,
+        "rivers_path": rivers_path,
+        "rain_path": rain_path,
+        "soil_path": soil_path,
+        "requested_target_date": input_paths["requested_target_date"],
+        "resolved_target_date": input_paths["resolved_target_date"],
+        "dynamic_scale": input_paths["dynamic_scale"],
+        "available_dynamic_dates": input_paths["available_dynamic_dates"],
+        "static_actions": input_paths.get("static_actions", []),
+        "dynamic_actions": input_paths.get("dynamic_actions", []),
     }
 
 
