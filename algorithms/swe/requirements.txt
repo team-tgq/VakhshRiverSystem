@@ -7,3 +7,11 @@ rioxarray
 scikit-learn==1.4.0
 platformdirs
 category_encoders==2.6.3
+requests
+netCDF4
+h5py
+cdsapi
+rasterio
+cfgrib
+eccodes
+pyshp

@@ -1,6 +1,8 @@
 *.pth
 *.mp4
 *.ubj
+*.pyc
+__pycache__/
 *.tif
 *.gpkg
 *.zip
