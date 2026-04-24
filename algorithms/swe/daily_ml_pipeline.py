@@ -9,7 +9,7 @@ import zipfile
 import hashlib
 from datetime import date, datetime, time, timedelta, timezone
 from io import StringIO
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -50,6 +50,7 @@ LEGACY_ERA5_ARCHIVE = BASE_DIR / "output" / "era5_land.nc"
 DAILY_OUTPUT_DIR = BASE_DIR / "output" / "daily_ml"
 MODEL_DIR = DAILY_OUTPUT_DIR / "models"
 RASTER_DIR = DAILY_OUTPUT_DIR / "rasters"
+DIAGNOSTIC_RASTER_DIR = RASTER_DIR / "diagnostics"
 SERIES_DIR = DAILY_OUTPUT_DIR / "series"
 CACHE_DIR = DAILY_OUTPUT_DIR / "cache"
 GFS_CACHE_DIR = CACHE_DIR / "gfs"
@@ -59,6 +60,7 @@ VIIRS_DAILY_CACHE_DIR = VIIRS_CACHE_DIR / "daily"
 HISTORICAL_VIIRS_CACHE_DIR = VIIRS_CACHE_DIR / "historical_vnp10c1"
 HISTORICAL_VIIRS_DAILY_CACHE_DIR = HISTORICAL_VIIRS_CACHE_DIR / "daily"
 STATE_CACHE_DIR = CACHE_DIR / "state"
+DEM_CACHE_DIR = CACHE_DIR / "dem"
 VIIRS_COLLECTION = "5200"
 VIIRS_PRODUCT = "VNP10_NRT"
 VIIRS_GEOMETA_PLATFORM = "NPP"
@@ -78,7 +80,7 @@ DAILY_SERIES_PATH = SERIES_DIR / "daily_basin_series.csv"
 ROUTING_SERIES_PATH = BASE_DIR.parent / "routing" / "data" / "SWE_daily_series.csv"
 
 BUSINESS_TIMEZONE = ZoneInfo("Asia/Dushanbe")
-MODEL_VERSION = "daily_swe_gbr_viirs_v3"
+MODEL_VERSION = "daily_swe_gbr_viirs_v4"
 TRAINING_START_DATE = date(2024, 2, 1)
 TRAINING_END_DATE = date(2025, 1, 31)
 NODATA_FLOAT = -9999.0
@@ -89,6 +91,18 @@ QA_VIIRS_CONSTRAINED = 2
 QA_COLD_START_EXTERNAL = 4
 
 ELEVATION_BANDS = 5
+TEMPERATURE_CORRECTION_MODE = "dem_lapse_rate_v1"
+DEFAULT_TEMPERATURE_LAPSE_RATE_C_PER_KM = 6.5
+TEMPERATURE_DEM_ENV_NAMES = ("SWE_DEM_PATH", "SWE_TEMPERATURE_DEM_PATH")
+TEMPERATURE_LAPSE_RATE_ENV_NAME = "SWE_DEM_LAPSE_RATE_C_PER_KM"
+TEMPERATURE_DEM_CANDIDATE_PATHS = (
+    BASE_DIR / "dem_clip.tif",
+    BASE_DIR / "dem.tif",
+    BASE_DIR.parent / "flood" / "data" / "processed" / "dem_clip.tif",
+    BASE_DIR.parent / "flood" / "data" / "processed" / "dem.tif",
+    BASE_DIR.parent / "flood" / "dem_clip.tif",
+    BASE_DIR.parent / "flood" / "dem.tif",
+)
 
 FEATURE_COLUMNS = [
     "latitude",
@@ -140,6 +154,8 @@ class DailyEntry:
     forcing_cache: str
     swe_mm: float
     snowmelt_mm_day: float
+    runtime_signature: dict[str, Any] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 def ensure_directories() -> None:
@@ -147,6 +163,7 @@ def ensure_directories() -> None:
         DAILY_OUTPUT_DIR,
         MODEL_DIR,
         RASTER_DIR,
+        DIAGNOSTIC_RASTER_DIR,
         SERIES_DIR,
         CACHE_DIR,
         GFS_CACHE_DIR,
@@ -156,6 +173,7 @@ def ensure_directories() -> None:
         HISTORICAL_VIIRS_CACHE_DIR,
         HISTORICAL_VIIRS_DAILY_CACHE_DIR,
         STATE_CACHE_DIR,
+        DEM_CACHE_DIR,
         ROUTING_SERIES_PATH.parent,
     ]:
         folder.mkdir(parents=True, exist_ok=True)
@@ -204,6 +222,59 @@ def _resolve_token_from_env(names: tuple[str, ...]) -> str | None:
     return None
 
 
+def _safe_float(value: str | None, default: float) -> float:
+    if value is None:
+        return float(default)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def temperature_lapse_rate_c_per_km() -> float:
+    return _safe_float(_resolve_token_from_env((TEMPERATURE_LAPSE_RATE_ENV_NAME,)), DEFAULT_TEMPERATURE_LAPSE_RATE_C_PER_KM)
+
+
+def resolve_temperature_dem_path() -> Path | None:
+    env_value = _resolve_token_from_env(TEMPERATURE_DEM_ENV_NAMES)
+    candidates: list[Path] = []
+    if env_value:
+        candidates.append(Path(env_value).expanduser())
+    candidates.extend(TEMPERATURE_DEM_CANDIDATE_PATHS)
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            resolved = candidate
+        if resolved.exists() and resolved.is_file():
+            return resolved
+    return None
+
+
+def _file_signature(path: Path | None) -> str:
+    if path is None or not path.exists():
+        return "missing"
+    stat = path.stat()
+    return f"{path.resolve().as_posix()}::{stat.st_size}::{stat.st_mtime_ns}"
+
+
+def temperature_correction_signature() -> dict[str, Any]:
+    dem_path = resolve_temperature_dem_path()
+    return {
+        "temperature_correction_mode": TEMPERATURE_CORRECTION_MODE,
+        "temperature_lapse_rate_c_per_km": temperature_lapse_rate_c_per_km(),
+        "temperature_dem_source": _file_signature(dem_path),
+    }
+
+
+def runtime_signature() -> dict[str, Any]:
+    return {
+        "model_version": MODEL_VERSION,
+        **temperature_correction_signature(),
+    }
+
+
 def training_window_days() -> int:
     return int((TRAINING_END_DATE - TRAINING_START_DATE).days + 1)
 
@@ -217,6 +288,7 @@ def training_metadata_signature() -> dict[str, Any]:
         "historical_viirs_source": HISTORICAL_VIIRS_SOURCE,
         "feature_columns": FEATURE_COLUMNS,
         "model_version": MODEL_VERSION,
+        **temperature_correction_signature(),
     }
 
 
@@ -319,6 +391,10 @@ def _find_manifest_entry(manifest: dict[str, Any], business_date_value: date) ->
 def _manifest_entry_is_reusable(entry: dict[str, Any] | None) -> bool:
     if not entry:
         return False
+    if entry.get("model_version") != MODEL_VERSION:
+        return False
+    if entry.get("runtime_signature") != runtime_signature():
+        return False
     required_paths = [
         entry.get("swe_raster"),
         entry.get("forcing_cache"),
@@ -384,6 +460,137 @@ def ensure_lat_desc(
     if lats[0] < lats[-1]:
         return values[::-1, :], lats[::-1], lons
     return values, lats, lons
+
+
+def _normalize_target_grid(
+    target_longitudes: np.ndarray,
+    target_latitudes: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, bool]:
+    lons = np.asarray(target_longitudes, dtype=np.float32)
+    lats = np.asarray(target_latitudes, dtype=np.float32)
+    flip_lat = bool(lats[0] < lats[-1])
+    if flip_lat:
+        lats = lats[::-1].copy()
+    return lons, lats, flip_lat
+
+
+def _dem_grid_cache_path(dem_path: Path, target_longitudes: np.ndarray, target_latitudes_desc: np.ndarray) -> Path:
+    digest = hashlib.sha1()
+    digest.update(_file_signature(dem_path).encode("utf-8"))
+    digest.update(np.asarray(target_longitudes, dtype=np.float32).tobytes())
+    digest.update(np.asarray(target_latitudes_desc, dtype=np.float32).tobytes())
+    return DEM_CACHE_DIR / f"dem_grid_{digest.hexdigest()[:16]}.npz"
+
+
+def load_dem_elevation_grid(
+    target_longitudes: np.ndarray,
+    target_latitudes: np.ndarray,
+) -> tuple[np.ndarray | None, dict[str, Any]]:
+    ensure_directories()
+    dem_path = resolve_temperature_dem_path()
+    if dem_path is None:
+        return None, {"status": "missing", "path": None}
+
+    target_lons, target_lats_desc, flip_lat = _normalize_target_grid(target_longitudes, target_latitudes)
+    cache_path = _dem_grid_cache_path(dem_path, target_lons, target_lats_desc)
+    dem_elevation: np.ndarray | None = None
+
+    if cache_path.exists():
+        cached = np.load(cache_path)
+        if "dem_elevation_m" in cached:
+            dem_elevation = cached["dem_elevation_m"].astype(np.float32)
+
+    if dem_elevation is None:
+        destination = np.full((len(target_lats_desc), len(target_lons)), np.nan, dtype=np.float32)
+        with rasterio.open(dem_path) as src:
+            source = src.read(1).astype(np.float32)
+            if src.nodata is not None and np.isfinite(src.nodata):
+                source[source == src.nodata] = np.nan
+            rasterio.warp.reproject(
+                source=source,
+                destination=destination,
+                src_transform=src.transform,
+                src_crs=src.crs or "EPSG:4326",
+                src_nodata=np.nan,
+                dst_transform=_grid_transform(target_lons, target_lats_desc),
+                dst_crs="EPSG:4326",
+                dst_nodata=np.nan,
+                resampling=rasterio.warp.Resampling.bilinear,
+            )
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(cache_path, dem_elevation_m=destination.astype(np.float32))
+        dem_elevation = destination
+
+    if dem_elevation is not None and flip_lat:
+        dem_elevation = dem_elevation[::-1, :].copy()
+
+    status = "ready" if dem_elevation is not None and np.any(np.isfinite(dem_elevation)) else "empty"
+    return dem_elevation, {"status": status, "path": str(dem_path)}
+
+
+def build_temperature_correction_context(
+    reference_elevation_m: np.ndarray,
+    target_longitudes: np.ndarray,
+    target_latitudes: np.ndarray,
+) -> dict[str, Any]:
+    reference = np.asarray(reference_elevation_m, dtype=np.float32)
+    dem_elevation_m, dem_meta = load_dem_elevation_grid(target_longitudes, target_latitudes)
+    correction = np.zeros_like(reference, dtype=np.float32)
+    dem_minus_reference = np.full_like(reference, np.nan, dtype=np.float32)
+    valid_mask = np.zeros_like(reference, dtype=bool)
+
+    if dem_elevation_m is not None:
+        valid_mask = np.isfinite(reference) & np.isfinite(dem_elevation_m)
+        dem_minus_reference[valid_mask] = dem_elevation_m[valid_mask] - reference[valid_mask]
+        correction[valid_mask] = -temperature_lapse_rate_c_per_km() * (dem_minus_reference[valid_mask] / 1000.0)
+
+    return {
+        "reference_elevation_m": reference,
+        "dem_elevation_m": dem_elevation_m.astype(np.float32) if dem_elevation_m is not None else None,
+        "dem_minus_reference_m": dem_minus_reference.astype(np.float32),
+        "temperature_correction_c": correction.astype(np.float32),
+        "valid_mask": valid_mask,
+        "applied": bool(np.any(valid_mask)),
+        "status": dem_meta.get("status", "missing"),
+        "dem_path": dem_meta.get("path"),
+        "lapse_rate_c_per_km": temperature_lapse_rate_c_per_km(),
+        "mode": TEMPERATURE_CORRECTION_MODE,
+    }
+
+
+def apply_temperature_correction(
+    temp_mean_c: np.ndarray,
+    temp_min_c: np.ndarray,
+    temp_max_c: np.ndarray,
+    correction_context: dict[str, Any],
+) -> dict[str, np.ndarray]:
+    correction = np.asarray(correction_context["temperature_correction_c"], dtype=np.float32)
+    raw_mean = np.asarray(temp_mean_c, dtype=np.float32)
+    raw_min = np.asarray(temp_min_c, dtype=np.float32)
+    raw_max = np.asarray(temp_max_c, dtype=np.float32)
+    return {
+        "temp_mean_raw_c": raw_mean,
+        "temp_min_raw_c": raw_min,
+        "temp_max_raw_c": raw_max,
+        "temp_mean_c": (raw_mean + correction).astype(np.float32),
+        "temp_min_c": (raw_min + correction).astype(np.float32),
+        "temp_max_c": (raw_max + correction).astype(np.float32),
+    }
+
+
+def _masked_array_stats(values: np.ndarray, mask: np.ndarray | None = None) -> dict[str, float]:
+    array = np.asarray(values, dtype=np.float32)
+    valid = np.isfinite(array)
+    if mask is not None:
+        valid &= mask.astype(bool)
+    if not np.any(valid):
+        return {"mean": 0.0, "min": 0.0, "max": 0.0}
+    subset = array[valid]
+    return {
+        "mean": float(np.nanmean(subset)),
+        "min": float(np.nanmin(subset)),
+        "max": float(np.nanmax(subset)),
+    }
 
 
 def build_inside_mask(longitudes: np.ndarray, latitudes_desc: np.ndarray) -> np.ndarray:
@@ -541,6 +748,105 @@ def save_raster(
         pass
 
     return str(output_path)
+
+
+def save_temperature_diagnostics(
+    business_date_value: date,
+    forcing: dict[str, Any],
+    inside_mask: np.ndarray,
+) -> dict[str, Any]:
+    context = forcing.get("temperature_correction_context") or {}
+    diagnostics: dict[str, Any] = {
+        "temperature_correction_mode": context.get("mode", TEMPERATURE_CORRECTION_MODE),
+        "temperature_correction_applied": bool(context.get("applied", False)),
+        "temperature_dem_status": context.get("status", "missing"),
+        "temperature_dem_path": context.get("dem_path"),
+        "temperature_lapse_rate_c_per_km": float(context.get("lapse_rate_c_per_km", temperature_lapse_rate_c_per_km())),
+    }
+
+    valid_mask = inside_mask.astype(bool)
+    if context.get("valid_mask") is not None:
+        valid_mask &= np.asarray(context["valid_mask"], dtype=bool)
+
+    correction_stats = _masked_array_stats(forcing.get("temperature_correction_c", np.zeros_like(inside_mask, dtype=np.float32)), valid_mask)
+    elevation_stats = _masked_array_stats(forcing.get("dem_minus_gfs_m", np.full_like(inside_mask, np.nan, dtype=np.float32)), valid_mask)
+    solid_stats = _masked_array_stats(forcing.get("solid_precip_correction_mm", np.zeros_like(inside_mask, dtype=np.float32)), inside_mask)
+
+    diagnostics.update(
+        {
+            "temperature_correction_mean_c": correction_stats["mean"],
+            "temperature_correction_min_c": correction_stats["min"],
+            "temperature_correction_max_c": correction_stats["max"],
+            "dem_minus_gfs_mean_m": elevation_stats["mean"],
+            "dem_minus_gfs_min_m": elevation_stats["min"],
+            "dem_minus_gfs_max_m": elevation_stats["max"],
+            "solid_precip_correction_mean_mm": solid_stats["mean"],
+            "solid_precip_correction_min_mm": solid_stats["min"],
+            "solid_precip_correction_max_mm": solid_stats["max"],
+        }
+    )
+
+    if not diagnostics["temperature_correction_applied"]:
+        return diagnostics
+
+    day_token = business_date_value.strftime("%Y%m%d")
+    temp_correction_path = DIAGNOSTIC_RASTER_DIR / f"TempCorrection_C_{day_token}.tif"
+    temp_mean_raw_path = DIAGNOSTIC_RASTER_DIR / f"TempMeanRaw_C_{day_token}.tif"
+    temp_mean_corrected_path = DIAGNOSTIC_RASTER_DIR / f"TempMeanCorrected_C_{day_token}.tif"
+    dem_delta_path = DIAGNOSTIC_RASTER_DIR / f"DEM_minus_GFS_Elevation_m_{day_token}.tif"
+    solid_delta_path = DIAGNOSTIC_RASTER_DIR / f"SolidPrecipCorrection_mm_{day_token}.tif"
+
+    masked_temp_correction = np.where(inside_mask, forcing["temperature_correction_c"], np.nan).astype(np.float32)
+    masked_temp_mean_raw = np.where(inside_mask, forcing["temp_mean_raw_c"], np.nan).astype(np.float32)
+    masked_temp_mean_corrected = np.where(inside_mask, forcing["temp_mean_c"], np.nan).astype(np.float32)
+    masked_dem_delta = np.where(inside_mask, forcing["dem_minus_gfs_m"], np.nan).astype(np.float32)
+    masked_solid_delta = np.where(inside_mask, forcing["solid_precip_correction_mm"], np.nan).astype(np.float32)
+
+    diagnostics.update(
+        {
+            "temperature_correction_raster": save_raster(
+                masked_temp_correction,
+                forcing["longitudes"],
+                forcing["latitudes"],
+                temp_correction_path,
+                NODATA_FLOAT,
+                "float32",
+            ),
+            "temp_mean_raw_raster": save_raster(
+                masked_temp_mean_raw,
+                forcing["longitudes"],
+                forcing["latitudes"],
+                temp_mean_raw_path,
+                NODATA_FLOAT,
+                "float32",
+            ),
+            "temp_mean_corrected_raster": save_raster(
+                masked_temp_mean_corrected,
+                forcing["longitudes"],
+                forcing["latitudes"],
+                temp_mean_corrected_path,
+                NODATA_FLOAT,
+                "float32",
+            ),
+            "dem_minus_gfs_raster": save_raster(
+                masked_dem_delta,
+                forcing["longitudes"],
+                forcing["latitudes"],
+                dem_delta_path,
+                NODATA_FLOAT,
+                "float32",
+            ),
+            "solid_precip_correction_raster": save_raster(
+                masked_solid_delta,
+                forcing["longitudes"],
+                forcing["latitudes"],
+                solid_delta_path,
+                NODATA_FLOAT,
+                "float32",
+            ),
+        }
+    )
+    return diagnostics
 
 
 def load_raster_array(raster_path: str) -> np.ndarray:
@@ -792,8 +1098,33 @@ class GFSClient:
         temp_mean = np.mean(temp_stack, axis=0).astype(np.float32)
         temp_min = np.min(temp_stack, axis=0).astype(np.float32)
         temp_max = np.max(temp_stack, axis=0).astype(np.float32)
-        solid_fraction = snow_fraction_from_temperature(temp_min, temp_max)
-        solid_precip = (daily_precip * solid_fraction).astype(np.float32)
+
+        temp_mean_desc = ensure_lat_desc(temp_mean, latitudes, longitudes)[0]
+        temp_min_desc = ensure_lat_desc(temp_min, latitudes, longitudes)[0]
+        temp_max_desc = ensure_lat_desc(temp_max, latitudes, longitudes)[0]
+        daily_precip_desc = ensure_lat_desc(daily_precip, latitudes, longitudes)[0]
+
+        temperature_correction_context = build_temperature_correction_context(
+            terrain["orography"],
+            terrain["longitudes"],
+            terrain["latitudes"],
+        )
+        corrected_temperatures = apply_temperature_correction(
+            temp_mean_desc,
+            temp_min_desc,
+            temp_max_desc,
+            temperature_correction_context,
+        )
+        solid_fraction_raw = snow_fraction_from_temperature(
+            corrected_temperatures["temp_min_raw_c"],
+            corrected_temperatures["temp_max_raw_c"],
+        )
+        solid_fraction = snow_fraction_from_temperature(
+            corrected_temperatures["temp_min_c"],
+            corrected_temperatures["temp_max_c"],
+        )
+        solid_precip_raw = (daily_precip_desc * solid_fraction_raw).astype(np.float32)
+        solid_precip = (daily_precip_desc * solid_fraction).astype(np.float32)
 
         return {
             "business_date": business_date_value.isoformat(),
@@ -803,11 +1134,21 @@ class GFSClient:
             "forecast_hours": forecast_hours,
             "latitudes": terrain["latitudes"],
             "longitudes": terrain["longitudes"],
-            "temp_mean_c": ensure_lat_desc(temp_mean, latitudes, longitudes)[0],
-            "temp_min_c": ensure_lat_desc(temp_min, latitudes, longitudes)[0],
-            "temp_max_c": ensure_lat_desc(temp_max, latitudes, longitudes)[0],
-            "precipitation_mm": ensure_lat_desc(daily_precip, latitudes, longitudes)[0],
-            "solid_precip_mm": ensure_lat_desc(solid_precip, latitudes, longitudes)[0],
+            "temp_mean_c": corrected_temperatures["temp_mean_c"],
+            "temp_min_c": corrected_temperatures["temp_min_c"],
+            "temp_max_c": corrected_temperatures["temp_max_c"],
+            "temp_mean_raw_c": corrected_temperatures["temp_mean_raw_c"],
+            "temp_min_raw_c": corrected_temperatures["temp_min_raw_c"],
+            "temp_max_raw_c": corrected_temperatures["temp_max_raw_c"],
+            "precipitation_mm": daily_precip_desc.astype(np.float32),
+            "solid_precip_mm": solid_precip.astype(np.float32),
+            "solid_precip_raw_mm": solid_precip_raw.astype(np.float32),
+            "solid_precip_correction_mm": (solid_precip - solid_precip_raw).astype(np.float32),
+            "temperature_correction_c": temperature_correction_context["temperature_correction_c"],
+            "dem_elevation_m": temperature_correction_context["dem_elevation_m"],
+            "gfs_orography_m": terrain["orography"],
+            "dem_minus_gfs_m": temperature_correction_context["dem_minus_reference_m"],
+            "temperature_correction_context": temperature_correction_context,
             "cold_start_seed_mm": ensure_lat_desc(cold_start_seed, latitudes, longitudes)[0]
             if cold_start_seed is not None
             else None,
@@ -1631,6 +1972,11 @@ class Era5PseudoLabelTrainer:
 
         terrain = self.gfs_client.get_static_terrain(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0))
         static_interp = self._interpolate_static_to_label_grid(terrain, label_lats, label_lons)
+        training_temp_correction_context = build_temperature_correction_context(
+            static_interp["orography"],
+            label_lons,
+            label_lats,
+        )
         viirs_daily = self._prefetch_training_viirs([timestamp.date() for timestamp in timestamps], label_lons, label_lats)
 
         frames: list[pd.DataFrame] = []
@@ -1640,6 +1986,12 @@ class Era5PseudoLabelTrainer:
             temp_mean = daily_tmean.sel(time=timestamp).values.astype(np.float32)
             temp_min = daily_tmin.sel(time=timestamp).values.astype(np.float32)
             temp_max = daily_tmax.sel(time=timestamp).values.astype(np.float32)
+            corrected_temperatures = apply_temperature_correction(
+                temp_mean,
+                temp_min,
+                temp_max,
+                training_temp_correction_context,
+            )
             observed_cover, viirs_status = viirs_daily.get(timestamp.date(), (None, "missing"))
             if observed_cover is None:
                 observed_cover = np.full_like(swe_mm, np.nan, dtype=np.float32)
@@ -1652,9 +2004,9 @@ class Era5PseudoLabelTrainer:
                     "longitude": lon_mesh.ravel(),
                     "swe_mm": swe_mm.ravel(),
                     "snow_depth_m": depth_m.ravel(),
-                    "temp_mean_c": temp_mean.ravel(),
-                    "temp_min_c": temp_min.ravel(),
-                    "temp_max_c": temp_max.ravel(),
+                    "temp_mean_c": corrected_temperatures["temp_mean_c"].ravel(),
+                    "temp_min_c": corrected_temperatures["temp_min_c"].ravel(),
+                    "temp_max_c": corrected_temperatures["temp_max_c"].ravel(),
                     "elevation_m": static_interp["orography"].ravel(),
                     "slope_deg": static_interp["slope_deg"].ravel(),
                     "aspect_deg": static_interp["aspect_deg"].ravel(),
@@ -1775,6 +2127,8 @@ class Era5PseudoLabelTrainer:
             "historical_viirs_fallback_days": int((date_viirs_observation == 0.0).sum()),
             "historical_viirs_observation_ratio": viirs_observation_ratio,
             "historical_viirs_fallback_ratio": float(1.0 - viirs_observation_ratio),
+            "training_temperature_correction_applied": bool(training_temp_correction_context["applied"]),
+            "training_temperature_dem_status": training_temp_correction_context["status"],
         }
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
         return frame, metadata
@@ -1823,6 +2177,7 @@ class Era5PseudoLabelTrainer:
             "training_window_days": training_window_days(),
             "historical_viirs_product": HISTORICAL_VIIRS_PRODUCT,
             "historical_viirs_source": HISTORICAL_VIIRS_SOURCE,
+            **temperature_correction_signature(),
         }
 
         bundle = {
@@ -1835,6 +2190,7 @@ class Era5PseudoLabelTrainer:
             "training_window_days": training_window_days(),
             "historical_viirs_product": HISTORICAL_VIIRS_PRODUCT,
             "historical_viirs_source": HISTORICAL_VIIRS_SOURCE,
+            **temperature_correction_signature(),
         }
         MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
         joblib.dump(bundle, MODEL_PATH)
@@ -2139,6 +2495,7 @@ def run_business_day(
     swe_masked = np.where(inside_mask, swe_mm, np.nan)
     snowmelt_masked = np.where(inside_mask, snowmelt_mm, np.nan)
     qa_masked = np.where(inside_mask, qa_flag, NODATA_INT)
+    diagnostics = save_temperature_diagnostics(business_date_value, forcing, inside_mask)
 
     day_token = business_date_value.strftime("%Y%m%d")
     swe_path = RASTER_DIR / f"SWE_mm_{day_token}.tif"
@@ -2177,6 +2534,8 @@ def run_business_day(
         forcing_cache=forcing_cache,
         swe_mm=basin_swe,
         snowmelt_mm_day=basin_melt,
+        runtime_signature=runtime_signature(),
+        diagnostics=diagnostics,
     )
 
 

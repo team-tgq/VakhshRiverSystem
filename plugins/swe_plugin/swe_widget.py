@@ -38,9 +38,10 @@ DISPLAY_LONG_EDGE = 320
 INPUT_DATA_TEXT = (
     "输入数据说明\n"
     "静态输入：高程、坡度、坡向、分区。\n"
-    "动态输入：GFS 日尺度气温与降水、固态降水、前一日 SWE 状态、近几日滚动统计。\n"
-    "观测约束：VIIRS 日雪盖分数，用于约束当天是否有雪。\n"
-    "说明：界面仅展示 SWE 图层；融雪和 QA 仍在后台计算并供下游模块使用。"
+    "动态输入：GFS 日尺度气温与降水、温度分相后的固态降水、前一日 SWE 状态、近几日滚动统计。\n"
+    "雪盖约束：VIIRS 日雪盖分数，用于约束当天是否有雪。\n"
+    "DEM 订正：若检测到 SWE_DEM_PATH 或现成 DEM，会按高程直减率对温度做订正，并同步重算固态降水。\n"
+    "界面只展示 SWE；Snowmelt 和 QA 仍在后台计算并供下游模块使用。"
 )
 
 
@@ -329,12 +330,24 @@ class SWEWidget(QWidget):
             return
 
         latest = self._latest_entry()
+        diagnostics = latest.get("diagnostics", {}) or {}
+        correction_applied = bool(diagnostics.get("temperature_correction_applied", False))
+        correction_mean = float(diagnostics.get("temperature_correction_mean_c", 0.0) or 0.0)
+        correction_min = float(diagnostics.get("temperature_correction_min_c", 0.0) or 0.0)
+        correction_max = float(diagnostics.get("temperature_correction_max_c", 0.0) or 0.0)
+        dem_status = diagnostics.get("temperature_dem_status", "missing")
+        dem_text = "已启用" if correction_applied else "未启用"
+        if correction_applied:
+            dem_text = f"{dem_text} ({correction_mean:+.2f} ℃, {correction_min:+.2f} ~ {correction_max:+.2f} ℃)"
+
         text = (
             f"最新业务日: {latest.get('business_date', '-')}\n"
             f"来源状态: {latest.get('source_status', '-')}\n"
             f"驱动周期: {latest.get('forcing_cycle', '-')}\n"
             f"VIIRS 状态: {latest.get('viirs_status', '-')}\n"
-            f"流域 SWE: {latest.get('swe_mm', float('nan')):.2f} mm"
+            f"流域 SWE: {latest.get('swe_mm', float('nan')):.2f} mm\n"
+            f"DEM 温度订正: {dem_text}\n"
+            f"DEM 状态: {dem_status}"
         )
         self.summary_label.setText(text)
 
