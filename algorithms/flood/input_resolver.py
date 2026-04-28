@@ -267,6 +267,24 @@ def _prepare_missing_dynamic_inputs(cfg: dict, target_date: Optional[date]) -> l
     return result.get("actions", [])
 
 
+def _record_dynamic_prepare_failure(actions: list[str], target_date: Optional[date], exc: Exception) -> None:
+    date_text = target_date.isoformat() if target_date else "最近可用日期"
+    detail = str(exc).strip() or repr(exc)
+    actions.append(
+        f"目标日期 {date_text} 的近实时逐日气象数据暂时没有获取成功，"
+        f"系统已继续查找本地最近可用的逐日数据。原因：{detail}"
+    )
+
+
+def _select_fallback_date(available_dates: list[date], requested_date: date) -> Optional[date]:
+    if not available_dates:
+        return None
+    not_later_dates = [item for item in available_dates if item <= requested_date]
+    if not_later_dates:
+        return not_later_dates[-1]
+    return available_dates[-1]
+
+
 def resolve_dynamic_inputs(
     cfg: dict,
     target_date: Optional[object] = None,
@@ -292,14 +310,35 @@ def resolve_dynamic_inputs(
     rain_candidates, soil_candidates, available_dates = _scan_daily_inputs()
 
     if requested_date is not None and requested_date not in available_dates and auto_prepare:
-        dynamic_actions = _prepare_missing_dynamic_inputs(cfg, requested_date)
+        try:
+            dynamic_actions.extend(_prepare_missing_dynamic_inputs(cfg, requested_date))
+        except Exception as exc:
+            _record_dynamic_prepare_failure(dynamic_actions, requested_date, exc)
         rain_candidates, soil_candidates, available_dates = _scan_daily_inputs()
     elif requested_date is None and not available_dates and auto_prepare:
-        dynamic_actions = _prepare_missing_dynamic_inputs(cfg, None)
+        try:
+            dynamic_actions.extend(_prepare_missing_dynamic_inputs(cfg, None))
+        except Exception as exc:
+            _record_dynamic_prepare_failure(dynamic_actions, None, exc)
         rain_candidates, soil_candidates, available_dates = _scan_daily_inputs()
 
     if requested_date is not None:
         if requested_date not in available_dates:
+            fallback_date = _select_fallback_date(available_dates, requested_date)
+            if fallback_date is not None:
+                dynamic_actions.append(
+                    f"目标日期 {requested_date.isoformat()} 没有完整逐日气象数据，"
+                    f"已自动改用最近可用日期 {fallback_date.isoformat()} 运行。"
+                )
+                return {
+                    "rain_path": rain_candidates[fallback_date],
+                    "soil_path": soil_candidates[fallback_date],
+                    "requested_target_date": requested_date.isoformat(),
+                    "resolved_target_date": fallback_date.isoformat(),
+                    "dynamic_scale": "daily",
+                    "available_dynamic_dates": [item.isoformat() for item in available_dates],
+                    "dynamic_actions": dynamic_actions,
+                }
             if not available_dates and legacy_available:
                 raise FileNotFoundError(
                     f"No daily dynamic inputs found for {requested_date.isoformat()}. "

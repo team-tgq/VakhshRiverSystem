@@ -31,6 +31,7 @@ CFG = {
     "south": 38.202345,
     "west": 69.219977,
     "east": 73.704541,
+    "gfs_bbox_pad_deg": 0.25,
 
     # ERA5-Land time selection (example: one month)
     "era5_year": "2018",
@@ -41,6 +42,7 @@ GFS_NOMADS_FILTER_URL = "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl
 GFS_NOMADS_PUB_ROOT = "https://nomads.ncep.noaa.gov/pub/data/nccf/com/gfs/prod"
 GFS_DAY_RUN_CYCLE = "00"
 GFS_DAY_FORECAST_HOUR = 24
+GFS_GRID_DEG = 0.25
 
 # 用 os.makedirs 创建 raw（存放原始下载数据）和 processed（存放对齐后的数据）文件夹。
 os.makedirs(CFG["raw_dir"], exist_ok=True)
@@ -392,6 +394,36 @@ def _resolve_dem_clip_path(cfg):
 
 
 def _resolve_bbox(cfg):
+    dem_path = _first_existing_path(
+        [
+            cfg.get("dem_path"),
+            os.path.join(os.path.abspath(cfg.get("proc_dir", CFG["proc_dir"])), "dem_clip.tif"),
+            os.path.join(CFG["proc_dir"], "dem_clip.tif"),
+            os.path.join(BASE_DIR, "dem_clip.tif"),
+        ]
+    )
+    if dem_path is not None:
+        with rasterio.open(dem_path) as src:
+            bounds = src.bounds
+            if src.crs is not None and src.crs.to_string() != "EPSG:4326":
+                west, south, east, north = rasterio.warp.transform_bounds(
+                    src.crs,
+                    "EPSG:4326",
+                    bounds.left,
+                    bounds.bottom,
+                    bounds.right,
+                    bounds.top,
+                    densify_pts=21,
+                )
+            else:
+                west, south, east, north = bounds.left, bounds.bottom, bounds.right, bounds.top
+        return {
+            "north": float(north),
+            "south": float(south),
+            "west": float(west),
+            "east": float(east),
+        }
+
     keys = ("north", "south", "west", "east")
     if all(key in cfg for key in keys):
         return {key: float(cfg[key]) for key in keys}
@@ -404,6 +436,16 @@ def _resolve_bbox(cfg):
         "south": float(south),
         "west": float(west),
         "east": float(east),
+    }
+
+
+def _expand_bbox(bbox, pad_deg):
+    pad = max(float(pad_deg), 0.0)
+    return {
+        "north": min(90.0, float(bbox["north"]) + pad),
+        "south": max(-90.0, float(bbox["south"]) - pad),
+        "west": max(-180.0, float(bbox["west"]) - pad),
+        "east": min(180.0, float(bbox["east"]) + pad),
     }
 
 
@@ -570,6 +612,7 @@ def download_gfs_daily_inputs(target_date=None, cfg=None, force=False, session=N
 
     dem_tif = _resolve_dem_clip_path(cfg)
     bbox = _resolve_bbox(cfg)
+    bbox = _expand_bbox(bbox, pad_deg=cfg.get("gfs_bbox_pad_deg", GFS_GRID_DEG))
     created_session = session is None
     client = session or requests.Session()
 

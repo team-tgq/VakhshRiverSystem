@@ -12,6 +12,9 @@ data/
 algorithms/monitoring/ultralytics/data/**/__pycache__/
 algorithms/monitoring/ultralytics/data/**/*.pyc
 outputs/
+algorithms/swe/output/
+runs/
+.codex/
 algorithms/inundation_monitoring/models/best_flood_unet.pth
 algorithms/monitoring/data/测试数据/流速测试视频.mp4
 algorithms/swe/snowai/density/density_model.ubj

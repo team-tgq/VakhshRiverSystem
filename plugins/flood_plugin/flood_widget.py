@@ -1,29 +1,35 @@
+import csv
 import os
 import re
 
 import geopandas as gpd
+import numpy as np
 import rasterio
+from matplotlib import colors as mcolors
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 from rasterio.plot import plotting_extent
 
 from PyQt5.QtCore import QDate, QUrl
 from PyQt5.QtWebEngineWidgets import QWebEngineView
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QDateEdit,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPushButton,
     QSizePolicy,
     QTabWidget,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
 )
-
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
 
 from algorithms.flood import risk_assessment_6factors_entropy
 from app.ui_hints import attach_hint, label_with_hint
@@ -37,6 +43,27 @@ class RasterCanvas(FigureCanvas):
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.updateGeometry()
 
+    def _plot_boundary(self, ax, tif_path, study_area_shp):
+        if not study_area_shp or not os.path.exists(study_area_shp):
+            return
+
+        gdf = gpd.read_file(study_area_shp)
+        with rasterio.open(tif_path) as src:
+            tif_crs = src.crs
+
+        if gdf.crs is not None and tif_crs is not None and gdf.crs != tif_crs:
+            gdf = gdf.to_crs(tif_crs)
+
+        gdf.boundary.plot(ax=ax, linewidth=1.5, color="#1E40AF")
+
+    def show_message(self, message):
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
+        ax.text(0.5, 0.5, message, ha="center", va="center", fontsize=12)
+        ax.axis("off")
+        self.figure.tight_layout()
+        self.draw()
+
     def plot_risk_tif(self, tif_path, study_area_shp=None):
         self.figure.clear()
         ax = self.figure.add_subplot(111)
@@ -48,20 +75,72 @@ class RasterCanvas(FigureCanvas):
                 arr[arr == nodata] = float("nan")
             extent = plotting_extent(src)
 
-        im = ax.imshow(arr, extent=extent, origin="upper")
+        im = ax.imshow(arr, extent=extent, origin="upper", cmap="YlOrRd")
         self.figure.colorbar(im, ax=ax, fraction=0.036, pad=0.04, label="Flood Risk")
+        self._plot_boundary(ax, tif_path, study_area_shp)
 
-        if study_area_shp and os.path.exists(study_area_shp):
-            gdf = gpd.read_file(study_area_shp)
-            with rasterio.open(tif_path) as src:
-                tif_crs = src.crs
+        ax.set_title("洪涝风险栅格")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.grid(False)
 
-            if gdf.crs is not None and tif_crs is not None and gdf.crs != tif_crs:
-                gdf = gdf.to_crs(tif_crs)
+        self.figure.tight_layout()
+        self.draw()
 
-            gdf.boundary.plot(ax=ax, linewidth=1.5)
+    def plot_landcover_tif(self, tif_path, study_area_shp=None):
+        self.figure.clear()
+        ax = self.figure.add_subplot(111)
 
-        ax.set_title("Flood Risk Raster")
+        with rasterio.open(tif_path) as src:
+            arr = src.read(1).astype("float32")
+            nodata = src.nodata
+            if nodata is not None:
+                arr[arr == nodata] = float("nan")
+            extent = plotting_extent(src)
+
+        finite_values = arr[np.isfinite(arr)]
+        if finite_values.size == 0:
+            self.show_message("土地利用底图暂无可显示数据。")
+            return
+
+        known_codes = list(risk_assessment_6factors_entropy.LANDCOVER_CLASSES.keys())
+        present_codes = sorted({int(round(float(value))) for value in np.unique(finite_values)})
+        ordered_codes = [code for code in known_codes if code in present_codes]
+        ordered_codes.extend(code for code in present_codes if code not in known_codes)
+
+        display = np.full(arr.shape, np.nan, dtype=np.float32)
+        labels = []
+        colors = []
+        for index, code in enumerate(ordered_codes):
+            info = risk_assessment_6factors_entropy.landcover_class_info(code)
+            mask = np.isfinite(arr) & (np.round(arr) == code)
+            display[mask] = float(index)
+            labels.append(info["name"])
+            colors.append(info["color"])
+
+        cmap = mcolors.ListedColormap(colors)
+        cmap.set_bad(alpha=0.0)
+        im = ax.imshow(
+            np.ma.masked_invalid(display),
+            extent=extent,
+            origin="upper",
+            cmap=cmap,
+            vmin=-0.5,
+            vmax=max(len(labels) - 0.5, 0.5),
+        )
+        cbar = self.figure.colorbar(
+            im,
+            ax=ax,
+            fraction=0.036,
+            pad=0.04,
+            ticks=list(range(len(labels))),
+        )
+        cbar.ax.set_yticklabels(labels)
+        cbar.ax.tick_params(labelsize=8)
+
+        self._plot_boundary(ax, tif_path, study_area_shp)
+
+        ax.set_title("土地利用类型底图")
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.grid(False)
@@ -71,6 +150,18 @@ class RasterCanvas(FigureCanvas):
 
 
 class FloodWidget(QWidget):
+    STATS_HEADER_LABELS = {
+        "landcover_code": "地类编码",
+        "landcover_name": "土地利用类型",
+        "included_in_ranking": "参与排名",
+        "pixel_count": "像元数",
+        "area_km2": "面积(km²)",
+        "mean_risk": "平均风险",
+        "p90_risk": "P90 风险",
+        "high_risk_ratio": "高风险占比",
+        "dominant_risk_level": "主导风险等级",
+    }
+
     def __init__(self):
         super().__init__()
         self.result_paths = None
@@ -103,18 +194,39 @@ class FloodWidget(QWidget):
         left_layout.addWidget(self.log, 1)
 
         right_tabs = QTabWidget()
-        self.raster_canvas = RasterCanvas()
+        self.risk_canvas = RasterCanvas()
+        self.landcover_canvas = RasterCanvas()
         self.map_view = QWebEngineView()
+        self.stats_table = QTableWidget()
+        self.stats_table.setAlternatingRowColors(True)
+        self.stats_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.stats_table.verticalHeader().setVisible(False)
+        self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.stats_table.horizontalHeader().setStretchLastSection(True)
+        self.stats_summary = QTextEdit()
+        self.stats_summary.setReadOnly(True)
 
-        raster_tab = QWidget()
-        raster_layout = QVBoxLayout(raster_tab)
-        raster_layout.addWidget(self.raster_canvas)
+        risk_tab = QWidget()
+        risk_layout = QVBoxLayout(risk_tab)
+        risk_layout.addWidget(self.risk_canvas)
+
+        landcover_tab = QWidget()
+        landcover_layout = QVBoxLayout(landcover_tab)
+        landcover_layout.addWidget(self.landcover_canvas)
+
+        stats_tab = QWidget()
+        stats_layout = QVBoxLayout(stats_tab)
+        stats_layout.addWidget(self.stats_table, 3)
+        stats_layout.addWidget(QLabel("解释摘要"))
+        stats_layout.addWidget(self.stats_summary, 1)
 
         map_tab = QWidget()
         map_layout = QVBoxLayout(map_tab)
         map_layout.addWidget(self.map_view)
 
-        right_tabs.addTab(raster_tab, "风险栅格")
+        right_tabs.addTab(risk_tab, "风险栅格")
+        right_tabs.addTab(landcover_tab, "土地利用")
+        right_tabs.addTab(stats_tab, "类型统计")
         right_tabs.addTab(map_tab, "交互地图")
 
         main_layout.addLayout(left_layout, 1)
@@ -252,6 +364,55 @@ class FloodWidget(QWidget):
     def _show_user_error(self, title, message):
         QMessageBox.critical(self, title, message)
 
+    def _format_top_landuse(self, entries, metric_key, percentage=False):
+        if not entries:
+            return "暂无可用统计"
+
+        parts = []
+        for item in entries[:3]:
+            value = item.get(metric_key)
+            if value is None:
+                continue
+            metric_text = f"{value:.1%}" if percentage else f"{value:.3f}"
+            parts.append(f"{item.get('landcover_name', '-') } ({metric_text})")
+        return "；".join(parts) if parts else "暂无可用统计"
+
+    def _clear_stats_table(self):
+        self.stats_table.clear()
+        self.stats_table.setRowCount(0)
+        self.stats_table.setColumnCount(0)
+
+    def _load_stats_table(self, csv_path):
+        if not csv_path or not os.path.exists(csv_path):
+            self._clear_stats_table()
+            return
+
+        with open(csv_path, "r", encoding="utf-8-sig", newline="") as file:
+            reader = csv.DictReader(file)
+            rows = list(reader)
+            columns = reader.fieldnames or []
+
+        self.stats_table.clear()
+        self.stats_table.setColumnCount(len(columns))
+        self.stats_table.setRowCount(len(rows))
+        self.stats_table.setHorizontalHeaderLabels(
+            [self.STATS_HEADER_LABELS.get(column, column) for column in columns]
+        )
+
+        for row_index, row in enumerate(rows):
+            for column_index, column in enumerate(columns):
+                item = QTableWidgetItem(row.get(column, ""))
+                self.stats_table.setItem(row_index, column_index, item)
+
+        self.stats_table.resizeColumnsToContents()
+
+    def _load_summary_text(self, summary_path):
+        if summary_path and os.path.exists(summary_path):
+            with open(summary_path, "r", encoding="utf-8") as file:
+                self.stats_summary.setPlainText(file.read())
+        else:
+            self.stats_summary.setPlainText("还没有可显示的土地利用解释摘要。")
+
     def run_analysis(self):
         target_date = self.date_input.date().toString("yyyy-MM-dd")
         try:
@@ -263,11 +424,18 @@ class FloodWidget(QWidget):
             self.result_paths = result
 
             self.log.append(f"动态数据来源：{result.get('dynamic_scale', 'unknown')}")
+            requested_date = result.get("requested_target_date")
+            resolved_date = result.get("resolved_target_date")
+            if requested_date and resolved_date and requested_date != resolved_date:
+                self.log.append(
+                    f"{requested_date} 的实时逐日数据暂时不可用，系统已自动使用最近可用日期 {resolved_date} 继续计算。"
+                )
             if result.get("resolved_target_date"):
                 self.log.append(f"实际使用日期：{result['resolved_target_date']}")
 
             self.log.append(f"降雨数据：{result['rain_path']}")
             self.log.append(f"土壤湿度数据：{result['soil_path']}")
+            self.log.append(f"土地利用数据：{result['landcover_path']}")
             if result.get("static_actions"):
                 self.log.append("静态数据处理：" + "；".join(result["static_actions"]))
             if result.get("dynamic_actions"):
@@ -275,6 +443,16 @@ class FloodWidget(QWidget):
 
             self.log.append(f"风险栅格已生成：{result['risk_tif']}")
             self.log.append(f"交互地图已生成：{result['map_html']}")
+            self.log.append(f"类型统计表已生成：{result['landuse_stats_csv']}")
+            self.log.append(f"解释摘要已生成：{result['landuse_summary_txt']}")
+            self.log.append(
+                "土地利用高风险占比前3："
+                + self._format_top_landuse(result.get("top_high_risk_landuse", []), "high_risk_ratio", percentage=True)
+            )
+            self.log.append(
+                "土地利用平均风险前3："
+                + self._format_top_landuse(result.get("top_mean_risk_landuse", []), "mean_risk", percentage=False)
+            )
 
             self.display_results()
             self.log.append("洪涝风险评估完成。")
@@ -292,6 +470,9 @@ class FloodWidget(QWidget):
             risk_tif = os.path.join(base_dir, "outputs", "risk_6factors.tif")
             map_html = os.path.join(base_dir, "outputs", "flood_risk_map.html")
             study_area_shp = os.path.join(base_dir, "study_area.shp")
+            landcover_path = os.path.join(base_dir, "data", "processed", "landcover_demgrid.tif")
+            landuse_stats_csv = os.path.join(base_dir, "outputs", "landuse_risk_stats.csv")
+            landuse_summary_txt = os.path.join(base_dir, "outputs", "landuse_risk_summary.txt")
 
             if not os.path.exists(risk_tif):
                 raise FileNotFoundError(f"Result raster not found: {risk_tif}")
@@ -302,6 +483,9 @@ class FloodWidget(QWidget):
                 "risk_tif": risk_tif,
                 "map_html": map_html,
                 "study_area_shp": study_area_shp,
+                "landcover_path": landcover_path,
+                "landuse_stats_csv": landuse_stats_csv,
+                "landuse_summary_txt": landuse_summary_txt,
             }
 
             self.display_results()
@@ -320,11 +504,25 @@ class FloodWidget(QWidget):
         risk_tif = self.result_paths["risk_tif"]
         map_html = self.result_paths["map_html"]
         study_area_shp = self.result_paths.get("study_area_shp")
+        landcover_path = self.result_paths.get("landcover_path")
+        landuse_stats_csv = self.result_paths.get("landuse_stats_csv")
+        landuse_summary_txt = self.result_paths.get("landuse_summary_txt")
 
-        self.raster_canvas.plot_risk_tif(
+        self.risk_canvas.plot_risk_tif(
             tif_path=risk_tif,
             study_area_shp=study_area_shp,
         )
+
+        if landcover_path and os.path.exists(landcover_path):
+            self.landcover_canvas.plot_landcover_tif(
+                tif_path=landcover_path,
+                study_area_shp=study_area_shp,
+            )
+        else:
+            self.landcover_canvas.show_message("未找到土地利用底图。")
+
+        self._load_stats_table(landuse_stats_csv)
+        self._load_summary_text(landuse_summary_txt)
 
         if os.path.exists(map_html):
             self.map_view.load(QUrl.fromLocalFile(os.path.abspath(map_html)))

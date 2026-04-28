@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import inspect
 import os
 from pathlib import Path
 
 import numpy as np
 import rasterio
 import rasterio.features
+import rasterio.warp
 import shapefile
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib import colormaps, colors
 from rasterio.enums import Resampling
+from rasterio.fill import fillnodata
 from rasterio.transform import from_bounds
 
 from PyQt5.QtCore import QObject, QThread, Qt, pyqtSignal
@@ -34,18 +37,20 @@ from algorithms.swe import swe_assessment
 
 DISPLAY_LAYER_KEY = "swe_raster"
 DISPLAY_LAYER_LABEL = "SWE"
-DISPLAY_LONG_EDGE = 320
+DISPLAY_LONG_EDGE = 960
 INPUT_DATA_TEXT = (
     "输入数据说明\n"
     "静态输入：高程、坡度、坡向、分区。\n"
-    "动态输入：GFS 日尺度气温与降水、固态降水、前一日 SWE 状态、近几日滚动统计。\n"
-    "观测约束：VIIRS 日雪盖分数，用于约束当天是否有雪。\n"
-    "说明：界面仅展示 SWE 图层；融雪和 QA 仍在后台计算并供下游模块使用。"
+    "动态输入：GFS 日尺度气温与降水、温度分相后的固态降水、前一日 SWE 状态、近几日滚动统计。\n"
+    "雪盖约束：VIIRS 日雪盖分数，用于约束当天是否有雪。\n"
+    "DEM 订正：若检测到 SWE_DEM_PATH 或现成 DEM，会按高程直减率对温度做订正，并同步重算固态降水。\n"
+    "界面只展示 SWE；Snowmelt 和 QA 仍在后台计算并供下游模块使用。"
 )
 
 
 class SWEWorker(QObject):
     finished = pyqtSignal()
+    progress = pyqtSignal(str)
     succeeded = pyqtSignal(object)
     failed = pyqtSignal(str)
 
@@ -56,7 +61,14 @@ class SWEWorker(QObject):
 
     def run(self) -> None:
         try:
-            result = self.target(**self.kwargs)
+            call_kwargs = dict(self.kwargs)
+            try:
+                parameters = inspect.signature(self.target).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            if "progress_callback" in parameters:
+                call_kwargs["progress_callback"] = self.progress.emit
+            result = self.target(**call_kwargs)
         except Exception as exc:
             self.failed.emit(str(exc) or repr(exc))
         else:
@@ -109,11 +121,60 @@ class SWEMapCanvas(FigureCanvas):
             ax.plot(xs, ys, color="#d62728", linewidth=1.3, zorder=5)
 
     def _display_shape(self, width: int, height: int) -> tuple[int, int]:
+        if max(width, height) >= DISPLAY_LONG_EDGE:
+            return height, width
         longest = max(width, height)
         scale = DISPLAY_LONG_EDGE / float(longest)
         display_height = max(1, int(round(height * scale)))
         display_width = max(1, int(round(width * scale)))
         return display_height, display_width
+
+    def _resample_for_display(
+        self,
+        array: np.ndarray,
+        *,
+        bounds,
+        transform,
+        crs,
+        width: int,
+        height: int,
+    ) -> tuple[np.ndarray, object]:
+        display_height, display_width = self._display_shape(width, height)
+        if display_height == height and display_width == width:
+            return array.astype(np.float32), transform
+
+        valid_mask = np.isfinite(array)
+        if np.any(valid_mask):
+            filled_array = fillnodata(
+                array.copy(),
+                mask=valid_mask.astype(np.uint8),
+                max_search_distance=max(array.shape),
+                smoothing_iterations=0,
+            ).astype(np.float32)
+        else:
+            filled_array = array.astype(np.float32)
+
+        display_transform = from_bounds(
+            bounds.left,
+            bounds.bottom,
+            bounds.right,
+            bounds.top,
+            display_width,
+            display_height,
+        )
+        display_array = np.full((display_height, display_width), np.nan, dtype=np.float32)
+        rasterio.warp.reproject(
+            source=filled_array,
+            destination=display_array,
+            src_transform=transform,
+            src_crs=crs,
+            dst_transform=display_transform,
+            dst_crs=crs,
+            resampling=Resampling.bilinear,
+            src_nodata=np.nan,
+            dst_nodata=np.nan,
+        )
+        return display_array, display_transform
 
     def plot_raster(self, raster_path: str, study_area_shp: str, layer_key: str) -> None:
         self.figure.clear()
@@ -121,30 +182,37 @@ class SWEMapCanvas(FigureCanvas):
         boundary_data = self._load_boundary_data(study_area_shp)
 
         with rasterio.open(raster_path) as dataset:
-            display_height, display_width = self._display_shape(dataset.width, dataset.height)
-            resampled = dataset.read(
-                1,
-                masked=True,
-                out_shape=(display_height, display_width),
-                resampling=Resampling.bilinear,
-            )
-            array = np.asarray(resampled.filled(np.nan), dtype=np.float32)
+            raster = dataset.read(1, masked=True)
+            native_array = np.asarray(raster.filled(np.nan), dtype=np.float32)
             bounds = dataset.bounds
-            transform = from_bounds(
-                bounds.left,
-                bounds.bottom,
-                bounds.right,
-                bounds.top,
-                display_width,
-                display_height,
-            )
+            native_transform = dataset.transform
+            native_crs = dataset.crs
             extent = (bounds.left, bounds.right, bounds.bottom, bounds.top)
+
+        if boundary_data:
+            native_inside_mask = rasterio.features.geometry_mask(
+                boundary_data["geometries"],
+                out_shape=native_array.shape,
+                transform=native_transform,
+                invert=True,
+                all_touched=False,
+            )
+            native_array = np.where(native_inside_mask, native_array, np.nan).astype(np.float32)
+
+        array, display_transform = self._resample_for_display(
+            native_array,
+            bounds=bounds,
+            transform=native_transform,
+            crs=native_crs,
+            width=native_array.shape[1],
+            height=native_array.shape[0],
+        )
 
         if boundary_data:
             inside_mask = rasterio.features.geometry_mask(
                 boundary_data["geometries"],
                 out_shape=array.shape,
-                transform=transform,
+                transform=display_transform,
                 invert=True,
                 all_touched=False,
             )
@@ -274,6 +342,7 @@ class SWEWidget(QWidget):
             return
 
         self._log(start_message)
+        self._log("系统会优先复用已有模型；如果本分支需要首次训练，下面会持续显示训练进度。")
         self._set_busy(True)
         self._success_message = success_message
         self._error_title = error_title
@@ -283,6 +352,7 @@ class SWEWidget(QWidget):
         self._worker.moveToThread(self._worker_thread)
 
         self._worker_thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._handle_worker_progress)
         self._worker.succeeded.connect(self._handle_worker_success)
         self._worker.failed.connect(self._handle_worker_error)
         self._worker.finished.connect(self._worker_thread.quit)
@@ -296,6 +366,10 @@ class SWEWidget(QWidget):
         self.populate_results()
         if self._success_message:
             self._log(self._success_message)
+
+    def _handle_worker_progress(self, message: str) -> None:
+        if message:
+            self._log(message)
 
     def _handle_worker_error(self, message: str) -> None:
         self._log(f"[ERROR] {message}")
@@ -329,12 +403,24 @@ class SWEWidget(QWidget):
             return
 
         latest = self._latest_entry()
+        diagnostics = latest.get("diagnostics", {}) or {}
+        correction_applied = bool(diagnostics.get("temperature_correction_applied", False))
+        correction_mean = float(diagnostics.get("temperature_correction_mean_c", 0.0) or 0.0)
+        correction_min = float(diagnostics.get("temperature_correction_min_c", 0.0) or 0.0)
+        correction_max = float(diagnostics.get("temperature_correction_max_c", 0.0) or 0.0)
+        dem_status = diagnostics.get("temperature_dem_status", "missing")
+        dem_text = "已启用" if correction_applied else "未启用"
+        if correction_applied:
+            dem_text = f"{dem_text} ({correction_mean:+.2f} ℃, {correction_min:+.2f} ~ {correction_max:+.2f} ℃)"
+
         text = (
             f"最新业务日: {latest.get('business_date', '-')}\n"
             f"来源状态: {latest.get('source_status', '-')}\n"
             f"驱动周期: {latest.get('forcing_cycle', '-')}\n"
             f"VIIRS 状态: {latest.get('viirs_status', '-')}\n"
-            f"流域 SWE: {latest.get('swe_mm', float('nan')):.2f} mm"
+            f"流域 SWE: {latest.get('swe_mm', float('nan')):.2f} mm\n"
+            f"DEM 温度订正: {dem_text}\n"
+            f"DEM 状态: {dem_status}"
         )
         self.summary_label.setText(text)
 
@@ -397,7 +483,7 @@ class SWEWidget(QWidget):
         self._start_background_task(
             target=swe_assessment.run_update_latest_swe,
             kwargs={"force_retrain": self.retrain_check.isChecked()},
-            start_message="开始更新最新 SWE 业务日（今天优先，不完整则回退昨天）...",
+            start_message="开始更新最新 SWE 业务日（今天优先，不完整则自动回退到昨天）...",
             success_message="最新 SWE 更新完成。",
             error_title="SWE 更新失败",
         )
