@@ -6,6 +6,9 @@ __pycache__/
 *.tif
 *.gpkg
 *.zip
+node_modules/
+reports/
+tmp/
 data/
 !algorithms/monitoring/ultralytics/data/
 !algorithms/monitoring/ultralytics/data/**

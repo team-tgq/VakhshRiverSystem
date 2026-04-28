@@ -75,11 +75,43 @@ class RasterCanvas(FigureCanvas):
                 arr[arr == nodata] = float("nan")
             extent = plotting_extent(src)
 
-        im = ax.imshow(arr, extent=extent, origin="upper", cmap="YlOrRd")
-        self.figure.colorbar(im, ax=ax, fraction=0.036, pad=0.04, label="Flood Risk")
+        level_breaks = risk_assessment_6factors_entropy.risk_level_breaks(arr)
+        classes = risk_assessment_6factors_entropy.classify_risk_levels(arr, level_breaks).astype("float32")
+        classes[classes == 0] = float("nan")
+        if not np.any(np.isfinite(classes)):
+            self.show_message("风险栅格暂无可显示数据。")
+            return
+
+        labels = []
+        colors = []
+        for _level_code, (lower, upper, label) in enumerate(level_breaks, start=1):
+            risk_range = risk_assessment_6factors_entropy.format_risk_range(lower, upper)
+            labels.append(f"{label}\n{risk_range}")
+            colors.append(risk_assessment_6factors_entropy.RISK_LEVEL_COLORS[label])
+
+        cmap = mcolors.ListedColormap(colors)
+        cmap.set_bad(alpha=0.0)
+        norm = mcolors.BoundaryNorm(np.arange(0.5, len(labels) + 1.5), cmap.N)
+        im = ax.imshow(
+            np.ma.masked_invalid(classes),
+            extent=extent,
+            origin="upper",
+            cmap=cmap,
+            norm=norm,
+        )
+        cbar = self.figure.colorbar(
+            im,
+            ax=ax,
+            fraction=0.036,
+            pad=0.04,
+            ticks=list(range(1, len(labels) + 1)),
+        )
+        cbar.ax.set_yticklabels(labels)
+        cbar.ax.tick_params(labelsize=8)
+        cbar.set_label("洪涝风险等级")
         self._plot_boundary(ax, tif_path, study_area_shp)
 
-        ax.set_title("洪涝风险栅格")
+        ax.set_title("洪涝风险等级（基于当前结果五分类）")
         ax.set_xlabel("X")
         ax.set_ylabel("Y")
         ax.grid(False)
@@ -377,6 +409,18 @@ class FloodWidget(QWidget):
             parts.append(f"{item.get('landcover_name', '-') } ({metric_text})")
         return "；".join(parts) if parts else "暂无可用统计"
 
+    def _format_risk_level_distribution(self, rows):
+        if not rows:
+            return "暂无可用统计"
+
+        parts = []
+        for row in rows:
+            level = row.get("risk_level", "-")
+            risk_range = row.get("risk_range", "-")
+            ratio = row.get("ratio", 0.0)
+            parts.append(f"{level}({risk_range}) {ratio:.1%}")
+        return "；".join(parts)
+
     def _clear_stats_table(self):
         self.stats_table.clear()
         self.stats_table.setRowCount(0)
@@ -442,6 +486,12 @@ class FloodWidget(QWidget):
                 self.log.append("动态数据处理：" + "；".join(result["dynamic_actions"]))
 
             self.log.append(f"风险栅格已生成：{result['risk_tif']}")
+            if result.get("risk_level_tif"):
+                self.log.append(f"五级风险等级栅格已生成：{result['risk_level_tif']}")
+            self.log.append(
+                "风险等级占比："
+                + self._format_risk_level_distribution(result.get("risk_level_distribution", []))
+            )
             self.log.append(f"交互地图已生成：{result['map_html']}")
             self.log.append(f"类型统计表已生成：{result['landuse_stats_csv']}")
             self.log.append(f"解释摘要已生成：{result['landuse_summary_txt']}")
@@ -468,6 +518,7 @@ class FloodWidget(QWidget):
         try:
             base_dir = os.path.dirname(risk_assessment_6factors_entropy.__file__)
             risk_tif = os.path.join(base_dir, "outputs", "risk_6factors.tif")
+            risk_level_tif = os.path.join(base_dir, "outputs", "risk_6factors_level.tif")
             map_html = os.path.join(base_dir, "outputs", "flood_risk_map.html")
             study_area_shp = os.path.join(base_dir, "study_area.shp")
             landcover_path = os.path.join(base_dir, "data", "processed", "landcover_demgrid.tif")
@@ -481,6 +532,7 @@ class FloodWidget(QWidget):
 
             self.result_paths = {
                 "risk_tif": risk_tif,
+                "risk_level_tif": risk_level_tif,
                 "map_html": map_html,
                 "study_area_shp": study_area_shp,
                 "landcover_path": landcover_path,

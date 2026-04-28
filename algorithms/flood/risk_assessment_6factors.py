@@ -17,9 +17,13 @@ try:
         minmax_norm,
         rasterize_rivers_to_mask,
         read_raster,
+        risk_level_breaks,
+        risk_level_distribution,
+        RISK_LEVEL_METHOD,
         save_landuse_explainability_outputs,
         save_weights_report,
         slope_from_dem,
+        write_risk_level_raster,
         write_raster,
     )
 except ImportError:
@@ -32,9 +36,13 @@ except ImportError:
         minmax_norm,
         rasterize_rivers_to_mask,
         read_raster,
+        risk_level_breaks,
+        risk_level_distribution,
+        RISK_LEVEL_METHOD,
         save_landuse_explainability_outputs,
         save_weights_report,
         slope_from_dem,
+        write_risk_level_raster,
         write_raster,
     )
 
@@ -47,6 +55,7 @@ CFG = {
     "raw_dir": os.path.join(BASE_DIR, "data", "raw"),
     "out_dir": os.path.join(BASE_DIR, "outputs"),
     "out_risk_tif": os.path.join(BASE_DIR, "outputs", "risk_6factors.tif"),
+    "out_risk_level_tif": os.path.join(BASE_DIR, "outputs", "risk_6factors_level.tif"),
     "out_map": os.path.join(BASE_DIR, "outputs", "flood_risk_map.html"),
     "out_weights_txt": os.path.join(BASE_DIR, "outputs", "final_weights.txt"),
     "out_landuse_stats_csv": os.path.join(BASE_DIR, "outputs", "landuse_risk_stats.csv"),
@@ -119,6 +128,7 @@ def run_risk_assessment(
     risk, valid_mask = compose_weighted_risk(factors, final_weights)
     risk[~valid_mask] = np.nan
     risk[np.isnan(dem)] = np.nan
+    level_breaks = risk_level_breaks(risk)
 
     save_weights_report(
         subjective_weights=final_weights,
@@ -131,6 +141,8 @@ def run_risk_assessment(
 
     write_raster(CFG["out_risk_tif"], risk, profile)
     print("[Saved]", CFG["out_risk_tif"])
+    write_risk_level_raster(CFG["out_risk_level_tif"], risk, profile, level_breaks)
+    print("[Saved]", CFG["out_risk_level_tif"])
 
     explainability = save_landuse_explainability_outputs(
         risk=risk,
@@ -155,6 +167,7 @@ def run_risk_assessment(
 
     return {
         "risk_tif": CFG["out_risk_tif"],
+        "risk_level_tif": CFG["out_risk_level_tif"],
         "map_html": CFG["out_map"],
         "weights_txt": CFG["out_weights_txt"],
         "landuse_stats_csv": CFG["out_landuse_stats_csv"],
@@ -177,6 +190,9 @@ def run_risk_assessment(
         "dynamic_actions": input_paths.get("dynamic_actions", []),
         "top_high_risk_landuse": explainability["top_high_risk_landuse"],
         "top_mean_risk_landuse": explainability["top_mean_risk_landuse"],
+        "risk_level_method": RISK_LEVEL_METHOD,
+        "risk_level_breaks": level_breaks,
+        "risk_level_distribution": risk_level_distribution(risk, level_breaks),
     }
 
 
