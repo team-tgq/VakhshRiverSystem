@@ -9,7 +9,6 @@ import folium
 import geopandas as gpd
 import numpy as np
 import rasterio
-from branca.colormap import linear
 from folium.raster_layers import ImageOverlay
 from rasterio.features import rasterize
 from scipy.ndimage import distance_transform_edt
@@ -119,13 +118,16 @@ LANDUSE_STATS_COLUMNS = [
     "dominant_risk_level",
 ]
 
-RISK_LEVELS = [
-    (0.0, 0.2, "低"),
-    (0.2, 0.4, "较低"),
-    (0.4, 0.6, "中"),
-    (0.6, 0.8, "较高"),
-    (0.8, 1.000001, "高"),
-]
+RISK_LEVEL_LABELS = ("低", "较低", "中", "较高", "高")
+RISK_LEVEL_METHOD = "result_quantile_5classes"
+
+RISK_LEVEL_COLORS = {
+    "低": "#2E7D32",
+    "较低": "#8BC34A",
+    "中": "#FDD835",
+    "较高": "#FB8C00",
+    "高": "#D32F2F",
+}
 
 CFG = {
     "study_area_shp": os.path.join(BASE_DIR, "study_area.shp"),
@@ -133,6 +135,7 @@ CFG = {
     "raw_dir": os.path.join(BASE_DIR, "data", "raw"),
     "out_dir": os.path.join(BASE_DIR, "outputs"),
     "out_risk_tif": os.path.join(BASE_DIR, "outputs", "risk_6factors.tif"),
+    "out_risk_level_tif": os.path.join(BASE_DIR, "outputs", "risk_6factors_level.tif"),
     "out_map": os.path.join(BASE_DIR, "outputs", "flood_risk_map.html"),
     "out_weights_txt": os.path.join(BASE_DIR, "outputs", "final_weights.txt"),
     "out_landuse_stats_csv": os.path.join(BASE_DIR, "outputs", "landuse_risk_stats.csv"),
@@ -174,6 +177,13 @@ def write_raster(path, arr, profile):
     prof.update(dtype="float32", count=1, nodata=np.nan)
     with rasterio.open(path, "w", **prof) as dst:
         dst.write(arr.astype(np.float32), 1)
+
+
+def write_risk_level_raster(path, risk, profile, breaks=None):
+    prof = profile.copy()
+    prof.update(dtype="uint8", count=1, nodata=0)
+    with rasterio.open(path, "w", **prof) as dst:
+        dst.write(classify_risk_levels(risk, breaks), 1)
 
 
 def minmax_norm(arr):
@@ -384,19 +394,110 @@ def _format_csv_value(value, digits=6):
     return str(value)
 
 
-def dominant_risk_level(values):
+def risk_level_breaks(risk):
+    values = np.asarray(risk, dtype=np.float64)
+    valid = np.isfinite(values)
+    if not np.any(valid):
+        return [(np.nan, np.nan, label) for label in RISK_LEVEL_LABELS]
+
+    clipped = np.clip(values[valid], 0.0, 1.0)
+    breaks = np.nanpercentile(clipped, [0, 20, 40, 60, 80, 100]).astype(np.float64)
+    if not np.all(np.isfinite(breaks)):
+        return [(np.nan, np.nan, label) for label in RISK_LEVEL_LABELS]
+
+    if breaks[0] == breaks[-1]:
+        center = float(breaks[0])
+        epsilon = max(abs(center) * 1e-6, 1e-6)
+        breaks = np.linspace(center - epsilon, center + epsilon, 6)
+    else:
+        for index in range(1, len(breaks)):
+            if breaks[index] <= breaks[index - 1]:
+                breaks[index] = np.nextafter(breaks[index - 1], np.inf)
+
+    return [
+        (float(breaks[index]), float(breaks[index + 1]), label)
+        for index, label in enumerate(RISK_LEVEL_LABELS)
+    ]
+
+
+def format_risk_range(lower, upper):
+    if not np.isfinite(lower) or not np.isfinite(upper):
+        return "-"
+    return f"{lower:.3f}-{upper:.3f}"
+
+
+def dominant_risk_level(values, breaks=None):
     if values.size == 0:
         return "无数据"
 
     clipped = np.clip(values.astype(np.float64), 0.0, 1.0)
+    level_breaks = breaks or risk_level_breaks(clipped)
     counts = []
-    for lower, upper, label in RISK_LEVELS:
-        if upper >= 1.0:
+    for index, (lower, upper, label) in enumerate(level_breaks):
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            count = 0
+        elif index == len(level_breaks) - 1:
             count = int(np.sum((clipped >= lower) & (clipped <= upper)))
         else:
             count = int(np.sum((clipped >= lower) & (clipped < upper)))
         counts.append((count, label))
     return max(counts, key=lambda item: item[0])[1]
+
+
+def risk_level_label(value, breaks=None):
+    if not np.isfinite(value):
+        return "无数据"
+
+    value = float(np.clip(value, 0.0, 1.0))
+    level_breaks = breaks or risk_level_breaks(np.array([value], dtype=np.float32))
+    for index, (lower, upper, label) in enumerate(level_breaks):
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            continue
+        if index == len(level_breaks) - 1:
+            if lower <= value <= upper:
+                return label
+        elif lower <= value < upper:
+            return label
+    return "无数据"
+
+
+def classify_risk_levels(risk, breaks=None):
+    values = np.asarray(risk, dtype=np.float32)
+    classes = np.zeros(values.shape, dtype=np.uint8)
+    finite = np.isfinite(values)
+    clipped = np.clip(values, 0.0, 1.0)
+    level_breaks = breaks or risk_level_breaks(clipped)
+
+    for level_code, (lower, upper, _label) in enumerate(level_breaks, start=1):
+        if not np.isfinite(lower) or not np.isfinite(upper):
+            continue
+        if level_code == len(level_breaks):
+            mask = finite & (clipped >= lower) & (clipped <= upper)
+        else:
+            mask = finite & (clipped >= lower) & (clipped < upper)
+        classes[mask] = level_code
+    return classes
+
+
+def risk_level_distribution(risk, breaks=None):
+    level_breaks = breaks or risk_level_breaks(risk)
+    classes = classify_risk_levels(risk, level_breaks)
+    valid = classes > 0
+    total = int(np.sum(valid))
+    rows = []
+    for level_code, (lower, upper, label) in enumerate(level_breaks, start=1):
+        pixel_count = int(np.sum(classes == level_code))
+        rows.append(
+            {
+                "level_code": level_code,
+                "risk_range": format_risk_range(lower, upper),
+                "risk_level": label,
+                "color": RISK_LEVEL_COLORS[label],
+                "pixel_count": pixel_count,
+                "ratio": float(pixel_count / total) if total else 0.0,
+            }
+        )
+    return rows
 
 
 def _pixel_area_km2(transform, crs, shape):
@@ -417,7 +518,7 @@ def _pixel_area_km2(transform, crs, shape):
     return np.nan
 
 
-def compute_landuse_risk_stats(risk, landcover, transform, crs):
+def compute_landuse_risk_stats(risk, landcover, transform, crs, level_breaks=None):
     valid_mask = np.isfinite(risk) & np.isfinite(landcover)
     finite_codes = sorted({int(round(float(code))) for code in np.unique(landcover[valid_mask])})
     ordered_known_codes = [code for code in LANDCOVER_CLASSES if code in finite_codes]
@@ -426,6 +527,7 @@ def compute_landuse_risk_stats(risk, landcover, transform, crs):
 
     pixel_area_km2 = _pixel_area_km2(transform, crs, risk.shape)
     rounded_landcover = np.round(landcover)
+    level_breaks = level_breaks or risk_level_breaks(risk[valid_mask])
     rows = []
 
     for code in ordered_codes:
@@ -435,10 +537,11 @@ def compute_landuse_risk_stats(risk, landcover, transform, crs):
 
         if pixel_count > 0:
             values = risk[code_mask].astype(np.float64)
+            classes = classify_risk_levels(values, level_breaks)
             mean_risk = float(np.nanmean(values))
             p90_risk = float(np.nanpercentile(values, 90))
-            high_risk_ratio = float(np.mean(values >= 0.6))
-            dominant_level = dominant_risk_level(values)
+            high_risk_ratio = float(np.mean(classes >= 4))
+            dominant_level = dominant_risk_level(values, level_breaks)
         else:
             mean_risk = np.nan
             p90_risk = np.nan
@@ -501,7 +604,7 @@ def _top_landuse_rows(rows, key):
     return ranked[:3]
 
 
-def save_landuse_risk_summary(rows, final_weights, out_path):
+def save_landuse_risk_summary(rows, final_weights, out_path, level_breaks=None):
     top_high_risk = _top_landuse_rows(rows, "high_risk_ratio")
     top_mean_risk = _top_landuse_rows(rows, "mean_risk")
 
@@ -517,6 +620,13 @@ def save_landuse_risk_summary(rows, final_weights, out_path):
     lines.append(
         f"Unknown finite code: {UNKNOWN_LANDCOVER['name']} -> {UNKNOWN_LANDCOVER['susceptibility']:.2f}\n\n"
     )
+
+    if level_breaks:
+        lines.append("[风险等级划分]\n")
+        lines.append("风险等级在连续风险指数计算完成后，按当前结果分位数划分为五档。\n")
+        for _level_code, (lower, upper, label) in enumerate(level_breaks, start=1):
+            lines.append(f"{label}: {format_risk_range(lower, upper)}\n")
+        lines.append("high_risk_ratio 按“较高 + 高”两档占比计算。\n\n")
 
     lines.append("[最终权重]\n")
     for key, value in final_weights.items():
@@ -570,9 +680,10 @@ def save_landuse_risk_summary(rows, final_weights, out_path):
 
 
 def save_landuse_explainability_outputs(risk, landcover, transform, crs, final_weights, stats_csv_path, summary_path):
-    rows = compute_landuse_risk_stats(risk, landcover, transform, crs)
+    level_breaks = risk_level_breaks(risk)
+    rows = compute_landuse_risk_stats(risk, landcover, transform, crs, level_breaks)
     save_landuse_risk_stats(rows, stats_csv_path)
-    summary_payload = save_landuse_risk_summary(rows, final_weights, summary_path)
+    summary_payload = save_landuse_risk_summary(rows, final_weights, summary_path, level_breaks)
     summary_payload["rows"] = rows
     return summary_payload
 
@@ -584,19 +695,13 @@ def _hex_to_rgba(hex_color, alpha):
     return [int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16), alpha]
 
 
-def _risk_rgba(risk):
-    risk_disp = np.clip(risk, 0, 1)
-    cm = linear.YlOrRd_09.scale(0, 1)
-    rgba = np.zeros((risk_disp.shape[0], risk_disp.shape[1], 4), dtype=np.uint8)
+def _risk_rgba(risk, breaks=None):
+    level_breaks = breaks or risk_level_breaks(risk)
+    classes = classify_risk_levels(risk, level_breaks)
+    rgba = np.zeros((classes.shape[0], classes.shape[1], 4), dtype=np.uint8)
 
-    flat = risk_disp.flatten()
-    rgba_2d = rgba.reshape(-1, 4)
-    for index, value in enumerate(flat):
-        if np.isnan(value):
-            rgba_2d[index] = [0, 0, 0, 0]
-        else:
-            r, g, b, _ = cm.rgba_bytes_tuple(float(value))
-            rgba_2d[index] = [r, g, b, 190]
+    for level_code, (_lower, _upper, label) in enumerate(level_breaks, start=1):
+        rgba[classes == level_code] = _hex_to_rgba(RISK_LEVEL_COLORS[label], 205)
     return rgba
 
 
@@ -658,10 +763,33 @@ def _add_landcover_legend(map_object):
     map_object.get_root().html.add_child(folium.Element(legend_html))
 
 
+def _add_risk_legend(map_object, breaks):
+    legend_lines = []
+    for _level_code, (lower, upper, label) in enumerate(breaks, start=1):
+        legend_lines.append(
+            "<div style=\"margin-bottom:4px;\">"
+            f"<span style=\"display:inline-block;width:12px;height:12px;background:{RISK_LEVEL_COLORS[label]};"
+            "margin-right:6px;border:1px solid #666;\"></span>"
+            f"{label}（{format_risk_range(lower, upper)}）</div>"
+        )
+
+    legend_html = (
+        "<div style=\"position: fixed; bottom: 35px; right: 35px; z-index: 9999; "
+        "background: rgba(255,255,255,0.92); padding: 12px 14px; border: 1px solid #999; "
+        "border-radius: 6px; font-size: 12px;\">"
+        "<div style=\"font-weight: 600; margin-bottom: 8px;\">洪涝风险等级</div>"
+        + "".join(legend_lines)
+        + "<div style=\"margin-top:6px;font-size:11px;color:#555;\">按当前结果分位数划分五档。</div>"
+        + "</div>"
+    )
+    map_object.get_root().html.add_child(folium.Element(legend_html))
+
+
 def build_folium_map(risk, landcover, dem_path, study_area_shp, out_map):
     west_lon, south_lat, east_lon, north_lat = _map_bounds_wgs84(dem_path)
     center = [(south_lat + north_lat) / 2.0, (west_lon + east_lon) / 2.0]
     map_object = folium.Map(location=center, zoom_start=8, tiles="cartodbpositron")
+    level_breaks = risk_level_breaks(risk)
 
     landcover_overlay = ImageOverlay(
         image=_landcover_rgba(landcover),
@@ -676,9 +804,9 @@ def build_folium_map(risk, landcover, dem_path, study_area_shp, out_map):
     landcover_overlay.add_to(map_object)
 
     risk_overlay = ImageOverlay(
-        image=_risk_rgba(risk),
+        image=_risk_rgba(risk, level_breaks),
         bounds=[[south_lat, west_lon], [north_lat, east_lon]],
-        name="洪涝风险",
+        name="洪涝风险等级",
         opacity=0.75,
         interactive=True,
         cross_origin=False,
@@ -698,9 +826,7 @@ def build_folium_map(risk, landcover, dem_path, study_area_shp, out_map):
         tooltip="Study Area",
     ).add_to(map_object)
 
-    risk_colormap = linear.YlOrRd_09.scale(0, 1)
-    risk_colormap.caption = "洪涝风险（0~1）"
-    risk_colormap.add_to(map_object)
+    _add_risk_legend(map_object, level_breaks)
     _add_landcover_legend(map_object)
 
     folium.LayerControl(collapsed=False).add_to(map_object)
@@ -781,9 +907,12 @@ def run_risk_assessment(
     risk, _ = compose_weighted_risk(factors, final_weights)
     risk[~valid_mask] = np.nan
     risk[np.isnan(dem)] = np.nan
+    level_breaks = risk_level_breaks(risk)
 
     write_raster(CFG["out_risk_tif"], risk, profile)
     print("[Saved]", CFG["out_risk_tif"])
+    write_risk_level_raster(CFG["out_risk_level_tif"], risk, profile, level_breaks)
+    print("[Saved]", CFG["out_risk_level_tif"])
 
     explainability = save_landuse_explainability_outputs(
         risk=risk,
@@ -808,6 +937,7 @@ def run_risk_assessment(
 
     return {
         "risk_tif": CFG["out_risk_tif"],
+        "risk_level_tif": CFG["out_risk_level_tif"],
         "map_html": CFG["out_map"],
         "weights_txt": CFG["out_weights_txt"],
         "landuse_stats_csv": CFG["out_landuse_stats_csv"],
@@ -830,6 +960,9 @@ def run_risk_assessment(
         "dynamic_actions": input_paths.get("dynamic_actions", []),
         "top_high_risk_landuse": explainability["top_high_risk_landuse"],
         "top_mean_risk_landuse": explainability["top_mean_risk_landuse"],
+        "risk_level_method": RISK_LEVEL_METHOD,
+        "risk_level_breaks": level_breaks,
+        "risk_level_distribution": risk_level_distribution(risk, level_breaks),
     }
 
 
