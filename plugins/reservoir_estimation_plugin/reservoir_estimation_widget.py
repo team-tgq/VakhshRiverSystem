@@ -1,249 +1,237 @@
-import os
-import geopandas as gpd
+from pathlib import Path
 
+from PyQt5.QtCore import QDate, Qt
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
-    QWidget,
-    QLabel,
-    QPushButton,
-    QVBoxLayout,
-    QHBoxLayout,
-    QMessageBox,
     QComboBox,
-    QDateEdit
+    QDateEdit,
+    QFileDialog,
+    QFormLayout,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QTabWidget,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtCore import QDate
 
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.figure import Figure
-
-from algorithms.reservoir_estimation.main_v import run_estimation
-from algorithms.reservoir_estimation.reservoir_config import RESERVOIR_CONFIGS
-from app.ui_hints import attach_hint, label_with_hint
+from algorithms.reservoir_estimation.reservoir_core import NurekReservoirEstimator, save_curve_plot
+from app.ui_hints import attach_hint
 
 
-class MapCanvas(FigureCanvas):
-    def __init__(self):
-        self.fig = Figure()
-        self.ax = self.fig.add_subplot(111)
-        super().__init__(self.fig)
-
-    def plot_region(self, reservoir_name, lon, lat):
-        project_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..")
-        )
-        region_path = os.path.join(
-            project_root,
-            "algorithms",
-            "reservoir_estimation",
-            "data",
-            "region.shp"
-        )
-
-        self.ax.clear()
-
-        if os.path.exists(region_path):
-            try:
-                gdf = gpd.read_file(region_path)
-                gdf.plot(
-                    ax=self.ax,
-                    color="lightblue",
-                    edgecolor="black",
-                    alpha=0.5
-                )
-            except Exception as e:
-                print(f"读取 region.shp 失败: {e}")
-
-        self.ax.scatter(
-            lon,
-            lat,
-            color="red",
-            s=80,
-            zorder=5
-        )
-
-        self.ax.text(
-            lon,
-            lat,
-            f" {reservoir_name}",
-            fontsize=12,
-            color="red",
-            weight="bold"
-        )
-
-        self.ax.set_title("Reservoir Region Map")
-        self.ax.set_xlabel("Longitude")
-        self.ax.set_ylabel("Latitude")
-        self.draw()
+PLUGIN_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = PLUGIN_DIR.parent.parent / "algorithms" / "reservoir_estimation" / "output" / "Nurek"
+PLOT_PATH = OUTPUT_DIR / "last_estimate_plot.png"
 
 
 class ReservoirEstimationWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.estimator = NurekReservoirEstimator()
+        self.image_path: Path | None = None
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout(self)
+        root = QVBoxLayout(self)
+        tabs = QTabWidget()
+        tabs.addTab(self.build_manual_tab(), "水位/面积估算")
+        tabs.addTab(self.build_image_tab(), "影像面积估算")
+        root.addWidget(tabs)
 
-        # 水库选择
-        name_layout = QHBoxLayout()
-        name_label = QLabel("水库名称")
+    def build_manual_tab(self) -> QWidget:
+        page = QWidget()
+        root = QGridLayout(page)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setHorizontalSpacing(14)
 
-        self.name_combo = QComboBox()
-        self.name_combo.addItems(list(RESERVOIR_CONFIGS.keys()))
-        name_hint = "内容：待估算水库名称。\n格式：从下拉列表选择。"
-        attach_hint(self.name_combo, name_hint)
+        form_box = QFrame()
+        form_box.setFrameShape(QFrame.StyledPanel)
+        form = QFormLayout(form_box)
+        form.setLabelAlignment(Qt.AlignRight)
 
-        name_layout.addWidget(label_with_hint(name_label, name_hint, stretch=False))
-        name_layout.addWidget(self.name_combo)
-        layout.addLayout(name_layout)
+        self.manual_date = QDateEdit()
+        self.manual_date.setCalendarPopup(True)
+        self.manual_date.setDisplayFormat("yyyy-MM-dd")
+        self.manual_date.setDate(QDate.currentDate())
 
-        # 起始日期
-        start_layout = QHBoxLayout()
-        start_label = QLabel("起始日期")
+        self.level_input = QLineEdit()
+        self.level_input.setPlaceholderText("例如 900.0")
+        attach_hint(self.level_input, "输入努列克水库水位，单位 m；留空时可用水面面积反推库容。")
 
-        self.start_input = QDateEdit()
-        self.start_input.setCalendarPopup(True)
-        self.start_input.setDisplayFormat("yyyy-MM-dd")
-        self.start_input.setDate(QDate(2022, 6, 1))
-        start_hint = "内容：估算起始日期。\n格式：yyyy-MM-dd，例如 2022-06-01。"
-        attach_hint(self.start_input, start_hint)
+        self.area_input = QLineEdit()
+        self.area_input.setPlaceholderText("可选，例如 68.2")
+        attach_hint(self.area_input, "输入水面面积，单位 km2；与水位同时输入时，库容以水位插值为准。")
 
-        start_layout.addWidget(label_with_hint(start_label, start_hint, stretch=False))
-        start_layout.addWidget(self.start_input)
-        layout.addLayout(start_layout)
+        compute = QPushButton("开始估算")
+        compute.clicked.connect(self.estimate_manual)
 
-        # 结束日期
-        end_layout = QHBoxLayout()
-        end_label = QLabel("结束日期")
+        form.addRow("日期", self.manual_date)
+        form.addRow("水位 (m)", self.level_input)
+        form.addRow("水面面积 (km2)", self.area_input)
+        form.addRow("", compute)
 
-        self.end_input = QDateEdit()
-        self.end_input.setCalendarPopup(True)
-        self.end_input.setDisplayFormat("yyyy-MM-dd")
-        self.end_input.setDate(QDate(2022, 6, 7))
-        end_hint = "内容：估算结束日期。\n格式：yyyy-MM-dd，例如 2022-06-07。"
-        attach_hint(self.end_input, end_hint)
+        self.manual_result = QTextEdit()
+        self.manual_result.setReadOnly(True)
+        self.manual_result.setMinimumWidth(380)
 
-        end_layout.addWidget(label_with_hint(end_label, end_hint, stretch=False))
-        end_layout.addWidget(self.end_input)
-        layout.addLayout(end_layout)
+        self.manual_plot = PlotLabel("库容曲线图")
 
-        # 运行按钮
-        self.run_button = QPushButton("运行计算")
-        self.run_button.clicked.connect(self.run_estimation_task)
-        layout.addWidget(self.run_button)
+        root.addWidget(form_box, 0, 0)
+        root.addWidget(self.manual_result, 1, 0)
+        root.addWidget(self.manual_plot, 0, 1, 2, 1)
+        root.setColumnStretch(0, 1)
+        root.setColumnStretch(1, 2)
+        return page
 
-        # 地图
-        self.canvas = MapCanvas()
-        layout.addWidget(self.canvas)
+    def build_image_tab(self) -> QWidget:
+        page = QWidget()
+        root = QGridLayout(page)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setHorizontalSpacing(14)
 
-        # CSV 按钮
-        csv_layout = QVBoxLayout()
-        self.csv_files = [
-            "estimation_area.csv",
-            "estimation_level0_product.csv",
-            "estimation_level1_product.csv",
-            "estimation_level2_product.csv",
-            "estimation_level3_product.csv",
-            "estimation_level4_product.csv",
-            "reservoir_hypsometry.csv"
-        ]
+        form_box = QFrame()
+        form_box.setFrameShape(QFrame.StyledPanel)
+        form = QFormLayout(form_box)
+        form.setLabelAlignment(Qt.AlignRight)
 
-        for file_name in self.csv_files:
-            btn = QPushButton(file_name)
-            btn.clicked.connect(self.open_csv)
-            csv_layout.addWidget(btn)
+        self.image_date = QDateEdit()
+        self.image_date.setCalendarPopup(True)
+        self.image_date.setDisplayFormat("yyyy-MM-dd")
+        self.image_date.setDate(QDate.currentDate())
 
-        layout.addLayout(csv_layout)
+        file_row = QWidget()
+        file_layout = QHBoxLayout(file_row)
+        file_layout.setContentsMargins(0, 0, 0, 0)
+        self.image_file_label = QLabel("未选择文件")
+        choose_file = QPushButton("选择影像")
+        choose_file.clicked.connect(self.choose_image)
+        file_layout.addWidget(self.image_file_label, 1)
+        file_layout.addWidget(choose_file)
 
-        # 初始化地图
-        self.plot_current_reservoir()
-        self.name_combo.currentIndexChanged.connect(self.plot_current_reservoir)
+        self.pixel_size_input = QLineEdit()
+        self.pixel_size_input.setPlaceholderText("GeoTIFF 可留空；普通图片填像元大小，如 10")
+        attach_hint(self.pixel_size_input, "非地理参考影像必须填写像元大小，单位 m。")
 
-    def get_current_reservoir_name(self):
-        return self.name_combo.currentText().strip()
+        self.threshold_input = QLineEdit()
+        self.threshold_input.setPlaceholderText("留空使用 Otsu 自动阈值")
+        attach_hint(self.threshold_input, "灰度水体分割阈值，范围通常为 0 到 1；留空时自动计算。")
 
-    def get_current_reservoir_config(self):
-        reservoir_name = self.get_current_reservoir_name()
-        if reservoir_name not in RESERVOIR_CONFIGS:
-            raise KeyError(f"未找到水库配置: {reservoir_name}")
-        return RESERVOIR_CONFIGS[reservoir_name]
+        self.water_mode = QComboBox()
+        self.water_mode.addItems(["dark", "bright"])
+        attach_hint(self.water_mode, "dark 表示水体在灰度图中更暗；bright 表示水体更亮。")
 
-    def plot_current_reservoir(self):
-        try:
-            reservoir_name = self.get_current_reservoir_name()
-            cfg = self.get_current_reservoir_config()
-            self.canvas.plot_region(
-                reservoir_name,
-                cfg["lon"],
-                cfg["lat"]
-            )
-        except Exception as e:
-            print(f"绘图失败: {e}")
+        compute = QPushButton("提取面积并估算")
+        compute.clicked.connect(self.estimate_image)
 
-    def run_estimation_task(self):
-        reservoir_name = self.get_current_reservoir_name()
-        start_date = self.start_input.date().toString("yyyy-MM-dd")
-        end_date = self.end_input.date().toString("yyyy-MM-dd")
+        form.addRow("日期", self.image_date)
+        form.addRow("影像", file_row)
+        form.addRow("像元大小 (m)", self.pixel_size_input)
+        form.addRow("阈值", self.threshold_input)
+        form.addRow("水体模式", self.water_mode)
+        form.addRow("", compute)
 
-        if not reservoir_name:
-            QMessageBox.warning(self, "错误", "请选择水库名称")
-            return
+        self.image_result = QTextEdit()
+        self.image_result.setReadOnly(True)
+        self.image_result.setMinimumWidth(380)
 
-        if self.start_input.date() > self.end_input.date():
-            QMessageBox.warning(self, "错误", "起始日期不能晚于结束日期")
-            return
+        self.image_plot = PlotLabel("影像估算曲线图")
 
-        try:
-            cfg = self.get_current_reservoir_config()
+        root.addWidget(form_box, 0, 0)
+        root.addWidget(self.image_result, 1, 0)
+        root.addWidget(self.image_plot, 0, 1, 2, 1)
+        root.setColumnStretch(0, 1)
+        root.setColumnStretch(1, 2)
+        return page
 
-            self.run_button.setEnabled(False)
-            self.run_button.setText("计算中...")
-
-            run_estimation(
-                reservoir_name,
-                cfg["lon"],
-                cfg["lat"],
-                cfg["bbox"],
-                start_date,
-                end_date,
-                cfg["elevation"],
-                cfg["param_1"],
-                cfg["year"]
-            )
-
-            QMessageBox.information(self, "完成", "计算完成")
-            self.canvas.plot_region(
-                reservoir_name,
-                cfg["lon"],
-                cfg["lat"]
-            )
-
-        except Exception as e:
-            QMessageBox.warning(self, "错误", str(e))
-
-        finally:
-            self.run_button.setEnabled(True)
-            self.run_button.setText("运行计算")
-
-    def open_csv(self):
-        button = self.sender()
-        file_name = button.text()
-        reservoir_name = self.get_current_reservoir_name()
-
-        project_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..")
+    def choose_image(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择遥感影像",
+            "",
+            "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;All files (*.*)",
         )
+        if path:
+            self.image_path = Path(path)
+            self.image_file_label.setText(self.image_path.name)
 
-        path = os.path.join(
-            project_root,
-            "algorithms",
-            "reservoir_estimation",
-            "output",
-            reservoir_name,
-            file_name
-        )
+    def estimate_manual(self):
+        try:
+            date = self.manual_date.date().toString("yyyy-MM-dd")
+            level = parse_optional_float(self.level_input.text())
+            area = parse_optional_float(self.area_input.text())
+            result = self.estimator.estimate_manual(date=date, water_level_m=level, area_km2=area)
+            self.manual_result.setPlainText(result.summary_text())
+            self.show_plot(result, self.manual_plot)
+        except Exception as exc:
+            QMessageBox.critical(self, "估算失败", str(exc))
 
-        if os.path.exists(path):
-            os.startfile(path)
-        else:
-            QMessageBox.warning(self, "错误", f"文件不存在:\n{path}")
+    def estimate_image(self):
+        try:
+            if self.image_path is None:
+                raise ValueError("请先选择影像文件。")
+            date = self.image_date.date().toString("yyyy-MM-dd")
+            pixel_size = parse_optional_float(self.pixel_size_input.text())
+            threshold = parse_optional_float(self.threshold_input.text())
+            area_result, estimate = self.estimator.estimate_from_image(
+                image_path=self.image_path,
+                date=date,
+                pixel_size_m=pixel_size,
+                threshold=threshold,
+                water_mode=self.water_mode.currentText(),
+            )
+            lines = [
+                f"Image: {area_result.image_path}",
+                f"Detected water area: {area_result.area_km2:.3f} km2",
+                f"Water pixels: {area_result.water_pixels} / {area_result.total_pixels}",
+                f"Pixel area: {area_result.pixel_area_m2:.3f} m2",
+                f"Threshold: {area_result.threshold:.4f}",
+                f"Water mode: {area_result.water_mode}",
+                "",
+                estimate.summary_text(),
+            ]
+            self.image_result.setPlainText("\n".join(lines))
+            self.show_plot(estimate, self.image_plot)
+        except Exception as exc:
+            QMessageBox.critical(self, "影像估算失败", str(exc))
+
+    def show_plot(self, result, label: "PlotLabel"):
+        save_curve_plot(result, PLOT_PATH)
+        label.set_plot(PLOT_PATH)
+
+
+class PlotLabel(QLabel):
+    def __init__(self, text: str):
+        super().__init__(text)
+        self._pixmap = None
+        self.setAlignment(Qt.AlignCenter)
+        self.setMinimumHeight(430)
+        self.setStyleSheet("background:#f8fafc;border:1px solid #cbd5e1;color:#334155;")
+
+    def set_plot(self, path: Path):
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            self._pixmap = None
+            self.setText("曲线图生成失败。")
+            return
+        self._pixmap = pixmap
+        self._refresh()
+
+    def resizeEvent(self, event):
+        self._refresh()
+        super().resizeEvent(event)
+
+    def _refresh(self):
+        if self._pixmap is not None:
+            self.setPixmap(self._pixmap.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+
+def parse_optional_float(text: str) -> float | None:
+    cleaned = text.strip()
+    if cleaned == "":
+        return None
+    return float(cleaned)
