@@ -28,27 +28,24 @@ VIS_STD = np.array(
 )
 
 DEFAULT_WEIGHT = Path(__file__).with_name("mitb2_Seg7C_HandBalanced_best.pth")
-LOCAL_BACKBONE_CANDIDATES = [
-    Path(r"D:\yfcode\PI_GAT_WF\wf\mit-b2"),
-    Path(r"D:\yfcode\PI-GAT\20260515\mit-b2"),
-    Path(r"E:\PI-GAT\mit-b2"),
-]
+BACKBONE_DIR = Path(__file__).with_name("mit-b2")
 
 
 def default_backbone_name():
-    for path in LOCAL_BACKBONE_CANDIDATES:
-        if path.is_dir():
-            return str(path)
-    return "nvidia/mit-b2"
+    if not BACKBONE_DIR.is_dir():
+        raise FileNotFoundError(f"Local SegFormer backbone not found: {BACKBONE_DIR}")
+    return str(BACKBONE_DIR)
 
 
 class SegFormerNet(nn.Module):
-    def __init__(self, vis_in=7, hidden_channels=64, backbone_name="nvidia/mit-b2"):
+    def __init__(self, vis_in=7, hidden_channels=64, backbone_name=None):
         super().__init__()
+        backbone_name = backbone_name or default_backbone_name()
         self.vis_stem = nn.Conv2d(vis_in, 3, kernel_size=1)
         self.backbone = SegformerModel.from_pretrained(
             backbone_name,
             output_hidden_states=True,
+            local_files_only=True,
         )
         self.decoder_conv = nn.ModuleList(
             [nn.Conv2d(channels, hidden_channels, 1) for channels in [64, 128, 320, 512]]
