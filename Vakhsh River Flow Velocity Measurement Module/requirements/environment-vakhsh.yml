@@ -1,0 +1,15 @@
+name: VakhshRiverSystem
+channels:
+  - pytorch
+  - defaults
+dependencies:
+  - python=3.9
+  - pip
+  - numpy
+  - scipy
+  - matplotlib
+  - pytorch
+  - pip:
+      - PyQt5
+      - opencv-python
+
