@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,63 @@ def default_backbone_name():
     if not BACKBONE_DIR.is_dir():
         raise FileNotFoundError(f"Local SegFormer backbone not found: {BACKBONE_DIR}")
     return str(BACKBONE_DIR)
+
+
+def _convert_legacy_segformer_key(key):
+    """Map Transformers 4.x SegFormer checkpoint keys to newer model names."""
+    key = key.replace("module.", "", 1)
+    key = re.sub(
+        r"^backbone\.encoder\.patch_embeddings\.(\d+)\.",
+        r"backbone.stages.\1.patch_embeddings.",
+        key,
+    )
+    key = re.sub(
+        r"^backbone\.encoder\.block\.(\d+)\.(\d+)\.",
+        r"backbone.stages.\1.blocks.\2.",
+        key,
+    )
+    key = re.sub(
+        r"^backbone\.encoder\.layer_norm\.(\d+)\.",
+        r"backbone.stages.\1.layer_norm.",
+        key,
+    )
+    replacements = (
+        (".layer_norm_1.", ".layernorm_before."),
+        (".layer_norm_2.", ".layernorm_after."),
+        (".attention.self.query.", ".attention.q_proj."),
+        (".attention.self.key.", ".attention.k_proj."),
+        (".attention.self.value.", ".attention.v_proj."),
+        (".attention.output.dense.", ".attention.o_proj."),
+        (
+            ".attention.self.sr.",
+            ".attention.sequence_reduction.sequence_reduction.",
+        ),
+        (
+            ".attention.self.layer_norm.",
+            ".attention.sequence_reduction.layer_norm.",
+        ),
+        (".mlp.dense1.", ".mlp.fc1."),
+        (".mlp.dense2.", ".mlp.fc2."),
+    )
+    for old, new in replacements:
+        key = key.replace(old, new)
+    return key
+
+
+def _normalize_state_dict_for_model(state, model):
+    model_keys = set(model.state_dict().keys())
+    clean_state = {key.replace("module.", "", 1): value for key, value in state.items()}
+    if all(key in model_keys for key in clean_state):
+        return clean_state
+
+    converted_state = {
+        _convert_legacy_segformer_key(key): value for key, value in clean_state.items()
+    }
+    if sum(key in model_keys for key in converted_state) > sum(
+        key in model_keys for key in clean_state
+    ):
+        return converted_state
+    return clean_state
 
 
 class SegFormerNet(nn.Module):
@@ -100,8 +158,21 @@ def load_model(weight_path=DEFAULT_WEIGHT, device=None, backbone_name=None):
     state = torch.load(str(weight_path), map_location=device)
     if isinstance(state, dict) and "model_state_dict" in state:
         state = state["model_state_dict"]
-    state = {key.replace("module.", "", 1): value for key, value in state.items()}
-    model.load_state_dict(state, strict=True)
+    state = _normalize_state_dict_for_model(state, model)
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing keys: {missing[:8]}{'...' if len(missing) > 8 else ''}")
+        if unexpected:
+            details.append(
+                f"unexpected keys: {unexpected[:8]}{'...' if len(unexpected) > 8 else ''}"
+            )
+        raise RuntimeError(
+            "Failed to load inundation SegFormer checkpoint. "
+            "Please check whether the weight file matches SegFormerNet. "
+            + "; ".join(details)
+        )
     model.eval()
     return model, device
 
@@ -170,7 +241,7 @@ def pad_to_multiple(tensor, multiple=32):
 
 
 @torch.no_grad()
-def predict_mask(image_path, model=None, device=None, threshold=0.50, weight_path=DEFAULT_WEIGHT):
+def predict_mask(image_path, model=None, device=None, threshold=0.90, weight_path=DEFAULT_WEIGHT):
     if model is None:
         model, device = load_model(weight_path=weight_path, device=device)
     elif device is None:
@@ -207,7 +278,7 @@ def main():
     parser.add_argument("image", help="input remote-sensing image, such as tif/png/jpg")
     parser.add_argument("-o", "--output", default="inundation_overlay.png", help="output overlay image")
     parser.add_argument("--weight", default=str(DEFAULT_WEIGHT), help="model weight path")
-    parser.add_argument("--threshold", type=float, default=0.50, help="mask threshold")
+    parser.add_argument("--threshold", type=float, default=0.90, help="mask threshold")
     args = parser.parse_args()
     save_result(args.image, args.output, threshold=args.threshold, weight_path=args.weight)
     print(f"saved overlay to {args.output}")
