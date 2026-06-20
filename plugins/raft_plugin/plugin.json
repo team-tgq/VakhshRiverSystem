@@ -1,0 +1,6 @@
+﻿{
+  "name": "RAFT光流测速",
+  "version": "1.0",
+  "author": "Your Name",
+  "description": "基于RAFT密集光流的河流表面流速测量模块"
+}
