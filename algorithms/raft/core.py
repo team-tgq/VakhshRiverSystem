@@ -8,6 +8,7 @@ All functions are independent of any GUI framework.
 
 import os
 import math
+from pathlib import Path
 import numpy as np
 import torch
 import cv2
@@ -15,6 +16,9 @@ import cv2
 from algorithms.raft.raft_model import RAFT
 from algorithms.raft.utils.utils import InputPadder
 from algorithms.raft.utils import flow_viz
+
+
+DEFAULT_MODEL_PATH = Path(__file__).with_name("raft-sintel.pth")
 
 
 class Args:
@@ -163,7 +167,7 @@ def run_raft_analysis(
     tilt_deg=35.0,
     start_frame=2,
     total_frames=10,
-    model_path="raft-sintel.pth",
+    model_path=None,
     device=None,
     progress_callback=None,
 ):
@@ -179,7 +183,7 @@ def run_raft_analysis(
         tilt_deg: Camera tilt angle in degrees (0=horizontal, 90=straight down).
         start_frame: Frame index to start from (1-based, default 2).
         total_frames: Number of frames to extract.
-        model_path: Path to RAFT .pth checkpoint.
+        model_path: Path to RAFT .pth checkpoint. Defaults to algorithms/raft/raft-sintel.pth.
         device: Torch device string. Auto-detected if None.
         progress_callback: Optional callable(i, total, status_message) for progress updates.
 
@@ -195,6 +199,7 @@ def run_raft_analysis(
     """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+    model_path = str(model_path or DEFAULT_MODEL_PATH)
 
     # Validate video
     cap = cv2.VideoCapture(video_path)
