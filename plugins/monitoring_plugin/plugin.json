@@ -1,5 +1,7 @@
 {
   "name": "水文监测模块",
   "version": "1.0",
-  "author": "孙畅"
+  "author": "孙畅",
+  "enabled": false,
+  "description": "旧水文监测模块已从主程序剔除，光流测速迁移至 raft_plugin。"
 }

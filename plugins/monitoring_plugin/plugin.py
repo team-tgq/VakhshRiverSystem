@@ -1,13 +1,3 @@
-# plugins/monitoring_plugin/plugin.py
-from app.base_plugin import BasePlugin
-from .monitoring_widget import MonitoringWidget
-
-
-class Plugin(BasePlugin):
-    def name(self):
-        return "水文监测系统"
-
-    def order(self):
-        return 1
-    def widget(self):
-        return MonitoringWidget()
+# 水文监测旧模块已从主程序剔除。
+# 保留该文件用于说明迁移状态，但不再定义 Plugin 类，
+# PluginManager 因此不会把旧水文监测标签加载到主界面。

@@ -1,54 +1,42 @@
 import os
-import cv2
+
 import numpy as np
 
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
-    QWidget,
-    QLabel,
-    QPushButton,
     QFileDialog,
-    QVBoxLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
-    QTextEdit,
+    QPushButton,
     QSizePolicy,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
 )
-from PyQt5.QtGui import QPixmap, QImage
-from PyQt5.QtCore import Qt
 
 from algorithms.inundation_monitoring.predictor import FloodPredictor
 from app.ui_hints import attach_hint, create_hint_badge, label_with_hint
 
 
 class ImageLabel(QLabel):
-    def __init__(self, text="No Image"):
+    def __init__(self, text="No image"):
         super().__init__(text)
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(260, 200)
+        self.setMinimumSize(300, 220)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("background:#f0f0f0;border:1px solid #ccc;")
+        self.setStyleSheet("background:#f5f7fa;border:1px solid #cbd5e1;color:#334155;")
         self._pix = None
 
     def set_qimage(self, qimg: QImage):
-        pix = QPixmap.fromImage(qimg)
-        self._pix = pix
+        self._pix = QPixmap.fromImage(qimg)
         self._refresh()
-
-    def clear_image(self, text="No Image"):
-        self._pix = None
-        self.clear()
-        self.setText(text)
 
     def _refresh(self):
         if self._pix is not None:
-            self.setPixmap(
-                self._pix.scaled(
-                    self.size(),
-                    Qt.KeepAspectRatio,
-                    Qt.SmoothTransformation
-                )
-            )
+            self.setPixmap(self._pix.scaled(self.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
     def resizeEvent(self, event):
         self._refresh()
@@ -58,79 +46,62 @@ class ImageLabel(QLabel):
 class InundationMonitoringWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-
         self.predictor = FloodPredictor()
         self.current_image_path = ""
         self.last_result = None
-
         self.init_ui()
 
     def init_ui(self):
         layout = QVBoxLayout(self)
 
-        # 阈值输入
-        thresh_layout = QHBoxLayout()
-        self.thresh_input = QLineEdit("0.5")
-        thresh_hint = "内容：淹没区概率阈值。\n格式：0 到 1 之间浮点数，例如 0.5。"
-        attach_hint(self.thresh_input, thresh_hint)
+        threshold_hint = "SegFormer 淹没概率阈值，范围 0 到 1；值越大，识别结果越保守。"
+        threshold_row = QHBoxLayout()
+        self.thresh_input = QLineEdit("0.50")
+        attach_hint(self.thresh_input, threshold_hint)
+        threshold_row.addWidget(label_with_hint("淹没识别阈值", threshold_hint, stretch=False))
+        threshold_row.addWidget(self.thresh_input)
+        layout.addLayout(threshold_row)
 
-        thresh_layout.addWidget(label_with_hint("淹没区识别阈值", thresh_hint, stretch=False))
-        thresh_layout.addWidget(self.thresh_input)
-        layout.addLayout(thresh_layout)
-
-        # 文件选择按钮
-        btn_layout = QHBoxLayout()
-
-        self.btn_select = QPushButton("选择SAR影像")
-        self.btn_select.clicked.connect(self.select_image)
-        sar_hint = (
-            "内容：用于淹没识别的 SAR 雷达影像（合成孔径雷达）。\n"
-            "格式：.tif/.tiff；建议为单波段灰度强度图，影像已做基础几何校正。"
+        input_hint = (
+            "选择遥感影像文件。优先使用多波段 GeoTIFF；模型会构建 6 个可见/近红外/SWIR "
+            "通道加 MNDWI 的 7 通道特征，普通图片会自动退化为 RGB/灰度特征。"
         )
-        attach_hint(self.btn_select, sar_hint)
+        button_row = QHBoxLayout()
+        self.btn_select = QPushButton("选择遥感影像")
+        self.btn_select.clicked.connect(self.select_image)
+        attach_hint(self.btn_select, input_hint)
 
-        self.btn_open_overlay = QPushButton("打开结果图")
+        self.btn_open_overlay = QPushButton("打开叠加图")
         self.btn_open_overlay.clicked.connect(self.open_overlay_file)
 
-        self.btn_open_mask = QPushButton("打开掩码图")
+        self.btn_open_mask = QPushButton("打开掩膜图")
         self.btn_open_mask.clicked.connect(self.open_mask_file)
 
-        btn_layout.addWidget(self.btn_select)
-        btn_layout.addWidget(create_hint_badge(sar_hint))
-        btn_layout.addWidget(self.btn_open_overlay)
-        btn_layout.addWidget(self.btn_open_mask)
+        button_row.addWidget(self.btn_select)
+        button_row.addWidget(create_hint_badge(input_hint))
+        button_row.addWidget(self.btn_open_overlay)
+        button_row.addWidget(self.btn_open_mask)
+        layout.addLayout(button_row)
 
-        layout.addLayout(btn_layout)
+        image_row = QHBoxLayout()
+        self.label_orig = ImageLabel("原始影像")
+        self.label_result = ImageLabel("淹没识别结果")
+        image_row.addWidget(self.label_orig, 1)
+        image_row.addWidget(self.label_result, 1)
+        layout.addLayout(image_row, 1)
 
-        sar_desc = QLabel("SAR 影像说明：SAR 是雷达遥感影像（非普通可见光照片），请优先选择 .tif/.tiff 数据。")
-        sar_desc.setWordWrap(True)
-        sar_desc.setStyleSheet("color:#555;font-size:12px;")
-        layout.addWidget(sar_desc)
-
-        # 图像显示
-        img_layout = QHBoxLayout()
-
-        self.label_orig = ImageLabel("原图")
-        self.label_result = ImageLabel("识别结果图")
-
-        img_layout.addWidget(self.label_orig, 1)
-        img_layout.addWidget(self.label_result, 1)
-
-        layout.addLayout(img_layout)
-
-        # 日志
         self.log = QTextEdit()
         self.log.setReadOnly(True)
+        self.log.setMinimumHeight(130)
         layout.addWidget(self.log)
 
     def select_image(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "选择SAR影像",
+            "选择遥感影像",
             "",
-            "TIF Files (*.tif *.tiff)"
+            "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;All Files (*)",
         )
-
         if file_path:
             self.current_image_path = file_path
             self.run_prediction(file_path)
@@ -138,72 +109,44 @@ class InundationMonitoringWidget(QWidget):
     def run_prediction(self, img_path: str):
         try:
             thresh = float(self.thresh_input.text().strip())
-
             if not (0.0 <= thresh <= 1.0):
-                raise ValueError("阈值必须在 0 到 1 之间")
+                raise ValueError("阈值必须在 0 到 1 之间。")
 
-            self.log.append(f"开始推理: {img_path}")
-            self.log.append(f"阈值: {thresh}")
+            self.log.append(f"开始 SegFormer 7 通道淹没识别: {img_path}")
+            self.log.append(f"阈值: {thresh:.2f}")
 
             result = self.predictor.predict(img_path, thresh=thresh)
             self.last_result = result
 
-            self.show_gray_image(self.label_orig, result["original"])
-            self.show_color_image(self.label_result, result["overlay"])
+            self.show_rgb_image(self.label_orig, result["original"])
+            self.show_rgb_image(self.label_result, result["overlay"])
 
             self.log.append(f"设备: {result['device']}")
-            self.log.append(f"掩码输出: {result['mask_path']}")
-            self.log.append(f"结果图输出: {result['overlay_path']}")
-            self.log.append("推理完成\n")
-
+            self.log.append(f"淹没占比: {result['water_ratio'] * 100:.2f}%")
+            self.log.append(f"掩膜输出: {result['mask_path']}")
+            self.log.append(f"叠加图输出: {result['overlay_path']}")
+            self.log.append("识别完成\n")
         except Exception as e:
-            self.log.append(f"[ERROR] {str(e)}\n")
-            QMessageBox.critical(self, "错误", str(e))
+            self.log.append(f"[ERROR] {e}\n")
+            QMessageBox.critical(self, "识别失败", str(e))
 
     def open_overlay_file(self):
-        if not self.last_result:
-            QMessageBox.warning(self, "提示", "请先运行识别")
-            return
-
-        path = self.last_result["overlay_path"]
-        if os.path.exists(path):
-            os.startfile(path)
-        else:
-            QMessageBox.warning(self, "错误", f"文件不存在:\n{path}")
+        self.open_result_file("overlay_path")
 
     def open_mask_file(self):
-        if not self.last_result:
-            QMessageBox.warning(self, "提示", "请先运行识别")
-            return
+        self.open_result_file("mask_path")
 
-        path = self.last_result["mask_path"]
+    def open_result_file(self, key: str):
+        if not self.last_result:
+            QMessageBox.warning(self, "提示", "请先运行识别。")
+            return
+        path = self.last_result[key]
         if os.path.exists(path):
             os.startfile(path)
         else:
-            QMessageBox.warning(self, "错误", f"文件不存在:\n{path}")
+            QMessageBox.warning(self, "文件不存在", path)
 
-    def show_gray_image(self, label: ImageLabel, img: np.ndarray):
-        img = (img * 255).astype(np.uint8)
-
-        qimg = QImage(
-            img.data,
-            img.shape[1],
-            img.shape[0],
-            img.shape[1],
-            QImage.Format_Grayscale8
-        ).copy()
-
-        label.set_qimage(qimg)
-
-    def show_color_image(self, label: ImageLabel, img: np.ndarray):
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-        qimg = QImage(
-            img_rgb.data,
-            img_rgb.shape[1],
-            img_rgb.shape[0],
-            img_rgb.shape[1] * 3,
-            QImage.Format_RGB888
-        ).copy()
-
+    def show_rgb_image(self, label: ImageLabel, img: np.ndarray):
+        arr = np.ascontiguousarray(img.astype(np.uint8))
+        qimg = QImage(arr.data, arr.shape[1], arr.shape[0], arr.shape[1] * 3, QImage.Format_RGB888).copy()
         label.set_qimage(qimg)
