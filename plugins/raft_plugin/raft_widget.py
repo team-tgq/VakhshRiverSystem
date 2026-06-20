@@ -7,7 +7,6 @@ on river video footage, supporting both Lucas-Kanade (LK) sparse and RAFT dense 
 
 import os
 import math
-from pathlib import Path
 import numpy as np
 import cv2
 
@@ -23,11 +22,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from algorithms.raft.core import run_raft_analysis, load_raft_model
-
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_RAFT_MODEL = PROJECT_ROOT / "raft-sintel.pth"
+from algorithms.raft.core import DEFAULT_MODEL_PATH, run_raft_analysis, load_raft_model
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +192,7 @@ class RaftWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.video_path = None
-        self._current_model_path = str(DEFAULT_RAFT_MODEL)
+        self._current_model_path = str(DEFAULT_MODEL_PATH)
         self._worker = None
         self._init_ui()
 

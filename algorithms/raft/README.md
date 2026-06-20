@@ -17,6 +17,7 @@ algorithms/raft/
 ├── raft_model.py        # RAFT 神经网络模型定义
 ├── extractor.py         # 特征编码器 (BasicEncoder / SmallEncoder)
 ├── update.py            # 迭代更新模块 (ConvGRU + FlowHead)
+├── raft-sintel.pth      # 预训练模型权重 (Sintel 数据集)
 ├── corr.py              # 全对相关性计算 + 可选 CUDA 加速
 ├── datasets.py          # 训练数据集加载器 (Sintel / KITTI / HD1K 等)
 └── utils/
@@ -32,7 +33,6 @@ plugins/raft_plugin/
 ├── plugin.py            # BasePlugin 注册
 └── raft_widget.py       # PyQt5 界面控件
 
-raft-sintel.pth          # 预训练模型权重 (Sintel 数据集)
 alt_cuda_corr/           # 可选 CUDA 加速扩展
 ```
 
@@ -60,7 +60,7 @@ result = run_raft_analysis(
     tilt_deg=35.0,                    # 相机俯角, 0=水平 90=垂直向下 (°)
     start_frame=2,                    # 起始帧 (1-based)
     total_frames=10,                  # 提取帧数
-    model_path="raft-sintel.pth",     # 模型权重路径
+    model_path=None,                  # None=使用 algorithms/raft/raft-sintel.pth
     device=None,                      # None=自动检测 CPU/GPU
     progress_callback=None,           # 可选进度回调 fn(i, total, msg)
 )
@@ -165,6 +165,6 @@ velocity = pixel_distance × meters_per_pixel / (1 / fps)
 
 ## 维护说明
 
-- 如需更新模型权重，替换根目录下的 `raft-sintel.pth` 并在 `core.py` 中验证 `state_dict` 键名兼容性。
+- 如需更新模型权重，替换 `algorithms/raft/raft-sintel.pth` 并在 `core.py` 中验证 `state_dict` 键名兼容性。
 - 算法层 (`core.py`) 和插件层 (`raft_widget.py`) 通过 dict 接口解耦，修改算法逻辑时不影响界面。
 - 插件通过 `PluginManager` 自动发现，无需修改 `main.py` 或 `app/` 中任何文件。
