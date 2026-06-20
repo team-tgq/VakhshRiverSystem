@@ -1,7 +1,0 @@
-{
-  "name": "水文监测",
-  "module": "plugins.monitoring_plugin.plugin",
-  "description": "基于 LK/RAFT 光流的河流表面流速测量模块",
-  "order": 10
-}
-

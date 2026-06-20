@@ -1,6 +1,6 @@
 {
   "name": "积雪状态识别",
-  "version": "1.0",
+  "version": "2.0",
   "author": "陈卓",
-  "description": "基于 Google Earth Engine 的积雪物理状态识别与导出模块"
+  "description": "基于 Google Earth Engine 的积雪状态识别与融雪径流概率预警模块"
 }

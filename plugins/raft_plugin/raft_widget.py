@@ -6,13 +6,10 @@ on river video footage, supporting both Lucas-Kanade (LK) sparse and RAFT dense 
 """
 
 import os
-import sys
-import csv
 import math
+from pathlib import Path
 import numpy as np
 import cv2
-import torch
-from datetime import datetime
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QFileDialog,
@@ -27,6 +24,10 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from algorithms.raft.core import run_raft_analysis, load_raft_model
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_RAFT_MODEL = PROJECT_ROOT / "raft-sintel.pth"
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +197,7 @@ class RaftWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.video_path = None
-        self._current_model_path = "raft-sintel.pth"
+        self._current_model_path = str(DEFAULT_RAFT_MODEL)
         self._worker = None
         self._init_ui()
 
@@ -305,6 +306,13 @@ class RaftWidget(QWidget):
     def _start_analysis(self):
         if not self.video_path:
             QMessageBox.warning(self, "提示", "请先选择视频文件")
+            return
+        if not os.path.isfile(self._current_model_path):
+            QMessageBox.critical(
+                self,
+                "模型缺失",
+                f"未找到 RAFT 权重文件:\n{self._current_model_path}",
+            )
             return
 
         method = self.cmb_method.currentText()

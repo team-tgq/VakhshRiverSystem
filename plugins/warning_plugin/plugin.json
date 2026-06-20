@@ -1,5 +1,7 @@
 {
   "name": "洪水智能预警监控模块",
   "version": "1.0",
-  "author": "高秀洁"
+  "author": "高秀洁",
+  "enabled": false,
+  "description": "预警模块当前不用，已从主程序加载列表中禁用。"
 }

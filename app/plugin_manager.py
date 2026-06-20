@@ -1,5 +1,6 @@
 import os
 import importlib
+import json
 from config import PLUGIN_DIR
 
 
@@ -21,6 +22,18 @@ class PluginManager:
             if not os.path.isdir(path):
                 continue
 
+            metadata_file = os.path.join(path, "plugin.json")
+            if os.path.exists(metadata_file):
+                try:
+                    with open(metadata_file, "r", encoding="utf-8-sig") as file:
+                        metadata = json.load(file)
+                    if metadata.get("enabled") is False:
+                        print(f"跳过插件: {folder} (enabled=false)")
+                        continue
+                except Exception as e:
+                    print("插件元数据读取失败:", folder, e)
+                    continue
+
             plugin_file = os.path.join(path, "plugin.py")
 
             if not os.path.exists(plugin_file):
@@ -28,6 +41,9 @@ class PluginManager:
 
             try:
                 module = importlib.import_module(f"{PLUGIN_DIR}.{folder}.plugin")
+                if not hasattr(module, "Plugin"):
+                    print(f"跳过插件: {folder} (未定义 Plugin 类)")
+                    continue
                 plugin = module.Plugin()
                 self.plugins.append(plugin)
 
