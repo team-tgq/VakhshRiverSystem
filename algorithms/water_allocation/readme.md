@@ -24,3 +24,5 @@
 权重下载链接：https://github.com/fieldsoftheworld/ftw-baselines/releases/download/v2/3_Class_FULL_FTW_Pretrained_v2.ckpt
 
 权重文件放在[VakhshRiverSystem\algorithms\water_allocation\resources\models]()中
+
+密钥路径：algorithms\water_allocation\resources\geodata\skillful-source-494707-h7-8f7b2bebcf57.json
