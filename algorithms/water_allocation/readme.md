@@ -25,4 +25,4 @@
 
 权重文件放在[VakhshRiverSystem\algorithms\water_allocation\resources\models]()中
 
-密钥路径：algorithms\water_allocation\resources\geodata\skillful-source-494707-h7-8f7b2bebcf57.json
+密钥存放路径：algorithms\water_allocation\resources\geodata\skillful-source-494707-h7-8f7b2bebcf57.json
