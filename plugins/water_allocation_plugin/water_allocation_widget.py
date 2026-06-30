@@ -730,27 +730,16 @@ class WaterAllocationWidget(QWidget):
         ftw_box = QGroupBox("本地影像处理")
         ftw_layout = QVBoxLayout(ftw_box)
         mask_row = QHBoxLayout()
-        mask_row.addWidget(QLabel("掩  膜:"))
+        
         self.mask_path_edit = QLineEdit()
-        # 默认挂哈特隆州界掩膜: 避免重叠瓦片重复计数 + 排除州外像素
+        
         _default_mask = str(_RESOURCE_DIR / "geodata" / "khatlon_region.geojson")
         if os.path.exists(_default_mask):
             self.mask_path_edit.setText(_default_mask)
-        self.mask_path_edit.setPlaceholderText("默认哈特隆州界，留空使用全图")
-        mask_row.addWidget(self.mask_path_edit)
-        mask_browse = QPushButton("浏览")
-        mask_browse.clicked.connect(lambda: self.mask_path_edit.setText(
-            QFileDialog.getOpenFileName(self, "选择GeoJSON", "", "GeoJSON (*.geojson *.json)")[0]
-            or self.mask_path_edit.text()))
-        mask_row.addWidget(mask_browse)
+        
+       
         ftw_layout.addLayout(mask_row)
-        mask_row2 = QHBoxLayout()
-        mask_row2.addWidget(QLabel("像素面积(m²):"))
-        self.rs_resolution_edit = QLineEdit("自动检测"); self.rs_resolution_edit.setFixedWidth(80)
-        self.rs_resolution_edit.setReadOnly(True)
-        mask_row2.addWidget(self.rs_resolution_edit)
-        mask_row2.addStretch()
-        ftw_layout.addLayout(mask_row2)
+        
 
         ftw_btn_row = QHBoxLayout()
         self.ftw_run_btn = QPushButton("🚀 选择影像并提取耕地面积")
