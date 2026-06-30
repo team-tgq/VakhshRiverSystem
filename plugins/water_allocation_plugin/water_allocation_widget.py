@@ -533,6 +533,21 @@ class WaterAllocationWidget(QWidget):
 
     # ======================= UI 初始化 =======================
     def _init_ui(self):
+        self.setStyleSheet("""
+            QGroupBox {
+                margin-top: 22px;
+                padding-top: 12px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 0 6px;
+                font-family: "Microsoft YaHei", "SimHei";
+                font-size: 10pt;
+                font-weight: 600;
+            }
+        """)
         root = QVBoxLayout(self)
         tabs = QTabWidget()
         root.addWidget(tabs)
@@ -555,88 +570,126 @@ class WaterAllocationWidget(QWidget):
         scroll.setWidget(container)
 
         # ── 时间范围配置 ──
-        time_box = QGroupBox("📅 全局供水配置")
+        time_box = QGroupBox("全局供水配置")
         time_grid = QGridLayout(time_box)
+        time_grid.setHorizontalSpacing(18)
+        time_grid.setVerticalSpacing(10)
+        time_grid.setColumnStretch(1, 1)
+        time_grid.setColumnStretch(3, 1)
         cur_year = datetime.date.today().year
         years = [str(i) for i in range(2000, cur_year + 20)]
         months = [str(i) for i in range(1, 13)]
 
-        time_grid.addWidget(QLabel("起始:"), 0, 0)
         self.start_year_cb = QComboBox()
         self.start_year_cb.addItems(years)
         self.start_year_cb.setCurrentText(str(cur_year - 1))
-        time_grid.addWidget(self.start_year_cb, 0, 1)
-        time_grid.addWidget(QLabel("年"), 0, 2)
+        self.start_year_cb.setMinimumWidth(90)
         self.start_month_cb = QComboBox()
         self.start_month_cb.addItems(months)
         self.start_month_cb.setCurrentText("1")
-        time_grid.addWidget(self.start_month_cb, 0, 3)
-        time_grid.addWidget(QLabel("月"), 0, 4)
+        self.start_month_cb.setMinimumWidth(70)
+        start_period = QWidget()
+        start_layout = QHBoxLayout(start_period)
+        start_layout.setContentsMargins(0, 0, 0, 0)
+        start_layout.setSpacing(6)
+        start_layout.addWidget(self.start_year_cb)
+        start_layout.addWidget(QLabel("年"))
+        start_layout.addWidget(self.start_month_cb)
+        start_layout.addWidget(QLabel("月"))
+        start_layout.addStretch()
 
-        time_grid.addWidget(QLabel("结束:"), 0, 5)
         self.end_year_cb = QComboBox()
         self.end_year_cb.addItems(years)
         self.end_year_cb.setCurrentText(str(cur_year))
-        time_grid.addWidget(self.end_year_cb, 0, 6)
-        time_grid.addWidget(QLabel("年"), 0, 7)
+        self.end_year_cb.setMinimumWidth(90)
         self.end_month_cb = QComboBox()
         self.end_month_cb.addItems(months)
         self.end_month_cb.setCurrentText("12")
-        time_grid.addWidget(self.end_month_cb, 0, 8)
+        self.end_month_cb.setMinimumWidth(70)
+        end_period = QWidget()
+        end_layout = QHBoxLayout(end_period)
+        end_layout.setContentsMargins(0, 0, 0, 0)
+        end_layout.setSpacing(6)
+        end_layout.addWidget(self.end_year_cb)
+        end_layout.addWidget(QLabel("年"))
+        end_layout.addWidget(self.end_month_cb)
+        end_layout.addWidget(QLabel("月"))
+        end_layout.addStretch()
+
+        time_grid.addWidget(QLabel("起始时间:"), 0, 0)
+        time_grid.addWidget(start_period, 0, 1)
+        time_grid.addWidget(QLabel("结束时间:"), 0, 2)
+        time_grid.addWidget(end_period, 0, 3)
 
         time_grid.addWidget(QLabel("时间粒度:"), 1, 0)
         self.time_scale_cb = QComboBox()
         self.time_scale_cb.addItems(["monthly", "daily", "yearly"])
         self.time_scale_cb.setCurrentText("monthly")
+        self.time_scale_cb.setMinimumWidth(120)
         time_grid.addWidget(self.time_scale_cb, 1, 1)
 
         time_grid.addWidget(QLabel("大坝起始可供水量(百万m³):"), 1, 4, 1, 3)
         self.w_surface_edit = QLineEdit("850")
-        self.w_surface_edit.setFixedWidth(100)
-        time_grid.addWidget(self.w_surface_edit, 1, 6, 1, 2)
+        self.w_surface_edit.setMinimumWidth(120)
+        time_grid.addWidget(self.w_surface_edit, 1, 3)
 
         body.addWidget(time_box)
 
         # ── 基础水文参数 ──
-        base_box = QGroupBox("📍 哈特隆州 指标估算与需水量配置")
+        base_box = QGroupBox("哈特隆州 指标估算与需水量配置")
         base_grid = QGridLayout(base_box)
+        base_grid.setHorizontalSpacing(18)
+        base_grid.setVerticalSpacing(10)
         params_data = [
-            ("人口(万人):", "pop", "387", 0, 0), ("城镇化率(%):", "urban", "23", 0, 2),
-            ("人口净增长率(%):", "pop_growth", "1.8", 0, 4), ("工业重复利用率(%):", "reuse", "25", 0, 6),
-            ("当地GDP(亿元):", "gdp", "82", 1, 0), ("生活废水回用率(%):", "dom_reuse", "15", 1, 2),
-            ("灌溉利用系数:", "eff", "0.85", 1, 4), ("传输损耗率(%):", "loss", "12", 1, 6),
-            ("生态保障用水(百万m³):", "eco", "50", 2, 0),
+            ("人口(万人):", "pop", "387"),
+            ("城镇化率(%):", "urban", "23"),
+            ("人口净增长率(%):", "pop_growth", "1.8"),
+            ("工业重复利用率(%):", "reuse", "25"),
+            ("当地GDP(亿元):", "gdp", "82"),
+            ("生活废水回用率(%):", "dom_reuse", "15"),
+            ("灌溉利用系数:", "eff", "0.85"),
+            ("传输损耗率(%):", "loss", "12"),
+            ("生态保障用水(百万m³):", "eco", "50"),
         ]
         self._param_edits = {}
-        for text, key, default, r, c in params_data:
+        for idx, (text, key, default) in enumerate(params_data):
+            r = idx // 3
+            c = (idx % 3) * 2
             base_grid.addWidget(QLabel(text), r, c)
             edit = QLineEdit(default)
-            edit.setFixedWidth(80)
+            edit.setMinimumWidth(90)
             base_grid.addWidget(edit, r, c + 1)
             self._param_edits[key] = edit
 
         meteo_btn = QPushButton("🌡️ 配置气象参数计算 ET0")
         meteo_btn.clicked.connect(self.open_meteo_config)
-        base_grid.addWidget(meteo_btn, 2, 2, 1, 3)
+        base_grid.addWidget(meteo_btn, 3, 0, 1, 6)
         body.addWidget(base_box)
 
         # ── 水电参数 ──
-        hydro_box = QGroupBox("⚡ 努列克坝发电机组物理参数")
-        hydro_layout = QHBoxLayout(hydro_box)
-        hydro_layout.addWidget(QLabel("单机最大功率(MW):"))
-        self.hydro_pmax_edit = QLineEdit("335"); self.hydro_pmax_edit.setFixedWidth(70)
-        hydro_layout.addWidget(self.hydro_pmax_edit)
-        hydro_layout.addWidget(QLabel("单机最大流量(m³/s):"))
-        self.hydro_qmax_edit = QLineEdit("146"); self.hydro_qmax_edit.setFixedWidth(70)
-        hydro_layout.addWidget(self.hydro_qmax_edit)
-        hydro_layout.addWidget(QLabel("上网电价(元/kWh):"))
-        self.hydro_price_edit = QLineEdit("0.4"); self.hydro_price_edit.setFixedWidth(70)
-        hydro_layout.addWidget(self.hydro_price_edit)
-        hydro_layout.addStretch()
+        hydro_box = QGroupBox("努列克坝发电机组物理参数")
+        hydro_grid = QGridLayout(hydro_box)
+        hydro_grid.setHorizontalSpacing(18)
+        hydro_grid.setVerticalSpacing(10)
+        hydro_grid.addWidget(QLabel("单机最大功率(MW):"), 0, 0)
+        self.hydro_pmax_edit = QLineEdit("335")
+        self.hydro_pmax_edit.setMinimumWidth(90)
+        hydro_grid.addWidget(self.hydro_pmax_edit, 0, 1)
+        hydro_grid.addWidget(QLabel("单机最大流量(m³/s):"), 0, 2)
+        self.hydro_qmax_edit = QLineEdit("146")
+        self.hydro_qmax_edit.setMinimumWidth(90)
+        hydro_grid.addWidget(self.hydro_qmax_edit, 0, 3)
+        hydro_grid.addWidget(QLabel("上网电价(元/kWh):"), 0, 4)
+        self.hydro_price_edit = QLineEdit("0.4")
+        self.hydro_price_edit.setMinimumWidth(90)
+        hydro_grid.addWidget(self.hydro_price_edit, 0, 5)
+        hydro_grid.setColumnStretch(1, 1)
+        hydro_grid.setColumnStretch(3, 1)
+        hydro_grid.setColumnStretch(5, 1)
         body.addWidget(hydro_box)
 
         # ── 农业作物配置 ──
-        crop_box = QGroupBox("🌾 农业作物动态配置")
+        crop_box = QGroupBox("农业作物动态配置")
         crop_outer = QVBoxLayout(crop_box)
 
         mode_layout = QHBoxLayout()
@@ -674,7 +727,7 @@ class WaterAllocationWidget(QWidget):
         sep.setFrameShape(QFrame.HLine)
         rs_layout.addWidget(sep)
 
-        ftw_box = QGroupBox("📁 本地影像处理")
+        ftw_box = QGroupBox("本地影像处理")
         ftw_layout = QVBoxLayout(ftw_box)
         mask_row = QHBoxLayout()
         mask_row.addWidget(QLabel("掩  膜:"))
@@ -709,7 +762,7 @@ class WaterAllocationWidget(QWidget):
         ftw_btn_row.addStretch()
         ftw_layout.addLayout(ftw_btn_row)
 
-        ftw_help = QGroupBox("📋 输入数据要求")
+        ftw_help = QGroupBox("输入数据要求")
         ftw_help_layout = QVBoxLayout(ftw_help)
         ftw_help_layout.addWidget(QLabel(
             "• 4波段(单日期): [B4红, B3绿, B2蓝, B8近红外]\n"
@@ -742,7 +795,7 @@ class WaterAllocationWidget(QWidget):
         body.addWidget(crop_box)
 
         # ── 权重配置 ──
-        weight_box = QGroupBox("⚖️ 决策偏好权重")
+        weight_box = QGroupBox("决策偏好权重")
         weight_layout = QHBoxLayout(weight_box)
         weight_layout.addWidget(QLabel("整体经济权重:"))
         self.w_econ_edit = QLineEdit("0.33"); self.w_econ_edit.setFixedWidth(50)
@@ -756,7 +809,7 @@ class WaterAllocationWidget(QWidget):
         weight_layout.addStretch()
         body.addWidget(weight_box)
 
-        t_weight_box = QGroupBox("🎛️ 部门收益权重 (T)")
+        t_weight_box = QGroupBox("部门收益权重 (T)")
         t_layout = QHBoxLayout(t_weight_box)
         self.t_edits = []
         for sec in self.sectors:
@@ -778,7 +831,7 @@ class WaterAllocationWidget(QWidget):
         layout = QVBoxLayout(self.tab_hydro)
 
         # 水情信息
-        info_box = QGroupBox("📊 实时水情信息")
+        info_box = QGroupBox("实时水情信息")
         info_layout = QVBoxLayout(info_box)
         info_row = QHBoxLayout()
         info_row.addWidget(QLabel("🌊 年平均径流量:"))
@@ -796,7 +849,7 @@ class WaterAllocationWidget(QWidget):
         layout.addWidget(info_box)
 
         # 数据源
-        ds_box = QGroupBox("📁 气象/水文数据源")
+        ds_box = QGroupBox("气象/水文数据源")
         ds_layout = QVBoxLayout(ds_box)
         ds_row = QHBoxLayout()
         ds_row.addWidget(QLabel("数据源:"))
@@ -830,7 +883,7 @@ class WaterAllocationWidget(QWidget):
         layout.addWidget(ds_box)
 
         # LSTM 训练
-        train_box = QGroupBox("🤖 LSTM 径流预测模型训练")
+        train_box = QGroupBox("LSTM 径流预测模型训练")
         train_layout = QVBoxLayout(train_box)
         train_row = QHBoxLayout()
         train_row.addWidget(QLabel("训练数据:"))
