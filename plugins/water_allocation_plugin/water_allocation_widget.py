@@ -131,20 +131,25 @@ class ResultDialog(QDialog):
             gini_tag = "(偏科严重，存在明显受损部门)"
 
         n_periods = r.get('n_periods', 1)
+        X_agg = r['X_agg']
+        D = r['D_demand']
+        loss = r['loss_rates'][0]
+        
+        shortage_agg = float(sum(
+            max(0.0, D[0, j] - (X_agg[0, 0, j] * (1 - loss) + X_agg[1, 0, j]))
+            for j in range(len(self.sectors))
+        ))
         lines = [
             f"🎯 哈特隆州水资源配置方案 ({r['time_scale']}, {n_periods} 期)",
             "=" * 85,
             f"💰 系统总综合经济效益参考值 : {r['profit']:,.2f} 万元",
-            f"📉 系统总缺水量       : {r['shortage']:,.2f} 百万m³",
+            f"📉 系统总缺水量       : {shortage_agg:,.2f} 百万m³",
             f"⚖️ 部门公平性 Gini   : {gini_d:.4f} {gini_tag}",
             "=" * 85,
             f"\n📍 地区：哈特隆州 (管网传输损耗率: {r['loss_rates'][0]*100:.1f}%)",
             f"{'部门':<10} | {'需水量':<10} | {'水库放水量':<10} | {'实收水量':<10} | {'满足率'}",
             "-" * 75,
         ]
-        X_agg = r['X_agg']
-        D = r['D_demand']
-        loss = r['loss_rates'][0]
         received_data = []
         for j, sec in enumerate(self.sectors):
             demand = D[0, j]
@@ -287,6 +292,7 @@ class FTWInferenceWorker(QThread):
     def run(self):
         try:
             import torch
+            import threading
             self.progress.emit("正在加载 FTW 模型权重…")
             device = self.params['device'] if torch.cuda.is_available() else 'cpu'
             model, num_classes = create_ftw_model(
@@ -305,8 +311,20 @@ class FTWInferenceWorker(QThread):
             per_file_info = []
             pixel_area_sqm = 0.0
             n_total = len(self.params['filepaths'])
-            n_workers = min(self.params.get('workers', 2), n_total)
+            n_workers = min(self.params.get('workers', 4), n_total)
             completed = [0]
+            # 多线程共用同一 CUDA 模型: 串行化前向, 防止并发推理卡死/崩溃
+            forward_lock = threading.Lock()
+
+            
+            self.progress.emit(f"开始推理 {n_total} 个影像 (并行 {n_workers})…")
+
+            def make_cb(fname_default):
+                def _cb(done, total, field_px, fname):
+                    self.progress.emit(
+                        f"[{completed[0]}/{n_total}] {fname} 窗口 {done}/{total} | "
+                        f"耕地像素 {field_px:,}")
+                return _cb
 
             def process_one(fpath, idx):
                 result = calculate_cropland_area(
@@ -317,6 +335,8 @@ class FTWInferenceWorker(QThread):
                     band_indices=FTW_BAND_INDICES,
                     mask_geometry=mask_geom,
                     ndvi_threshold=self.params['ndvi_threshold'],
+                    progress_callback=make_cb(os.path.basename(fpath)),
+                    forward_lock=forward_lock,
                 )
                 return idx, os.path.basename(fpath), result
 
@@ -557,7 +577,7 @@ class WaterAllocationWidget(QWidget):
         time_grid.setColumnStretch(1, 1)
         time_grid.setColumnStretch(3, 1)
         cur_year = datetime.date.today().year
-        years = [str(i) for i in range(2000, cur_year + 16)]
+        years = [str(i) for i in range(2000, cur_year + 20)]
         months = [str(i) for i in range(1, 13)]
 
         self.start_year_cb = QComboBox()
@@ -608,7 +628,7 @@ class WaterAllocationWidget(QWidget):
         self.time_scale_cb.setMinimumWidth(120)
         time_grid.addWidget(self.time_scale_cb, 1, 1)
 
-        time_grid.addWidget(QLabel("大坝起始可供水量(百万m³):"), 1, 2)
+        time_grid.addWidget(QLabel("大坝起始可供水量(百万m³):"), 1, 4, 1, 3)
         self.w_surface_edit = QLineEdit("850")
         self.w_surface_edit.setMinimumWidth(120)
         time_grid.addWidget(self.w_surface_edit, 1, 3)
@@ -710,23 +730,16 @@ class WaterAllocationWidget(QWidget):
         ftw_box = QGroupBox("本地影像处理")
         ftw_layout = QVBoxLayout(ftw_box)
         mask_row = QHBoxLayout()
-        mask_row.addWidget(QLabel("掩  膜:"))
+        
         self.mask_path_edit = QLineEdit()
-        self.mask_path_edit.setPlaceholderText("可选，留空使用全图")
-        mask_row.addWidget(self.mask_path_edit)
-        mask_browse = QPushButton("浏览")
-        mask_browse.clicked.connect(lambda: self.mask_path_edit.setText(
-            QFileDialog.getOpenFileName(self, "选择GeoJSON", "", "GeoJSON (*.geojson *.json)")[0]
-            or self.mask_path_edit.text()))
-        mask_row.addWidget(mask_browse)
+        
+        _default_mask = str(_RESOURCE_DIR / "geodata" / "khatlon_region.geojson")
+        if os.path.exists(_default_mask):
+            self.mask_path_edit.setText(_default_mask)
+        
+       
         ftw_layout.addLayout(mask_row)
-        mask_row2 = QHBoxLayout()
-        mask_row2.addWidget(QLabel("像素面积(m²):"))
-        self.rs_resolution_edit = QLineEdit("自动检测"); self.rs_resolution_edit.setFixedWidth(80)
-        self.rs_resolution_edit.setReadOnly(True)
-        mask_row2.addWidget(self.rs_resolution_edit)
-        mask_row2.addStretch()
-        ftw_layout.addLayout(mask_row2)
+        
 
         ftw_btn_row = QHBoxLayout()
         self.ftw_run_btn = QPushButton("🚀 选择影像并提取耕地面积")
@@ -928,7 +941,7 @@ class WaterAllocationWidget(QWidget):
         params = {
             'filepaths': list(filepaths), 'weights': weights_path, 'device': 'cuda',
             'mask_path': self.mask_path_edit.text().strip(),
-            'window_size': 1024, 'overlap': 64, 'ndvi_threshold': 0.3, 'workers': 2,
+            'window_size': 1024, 'overlap': 64, 'ndvi_threshold': 0.15, 'workers': 2,
         }
         self.ftw_run_btn.setEnabled(False)
         self.ftw_status_label.setText("🔄 正在加载模型并处理影像文件…")
@@ -1069,9 +1082,9 @@ class WaterAllocationWidget(QWidget):
             elif month in [4, 5]:
                 total_revenue = area * 350000.0 * 7.5
             elif month in [6, 7, 8]:
-                total_revenue = area * 35000000.0 * 7.5
+                total_revenue = area * 350000.0 * 7.5
             elif month in [9, 10]:
-                total_revenue = area * 3500000.0 * 7.5
+                total_revenue = area * 350000.0 * 7.5
             else:
                 total_revenue = area * 417300.0 * 2.5
         else:
@@ -1083,8 +1096,12 @@ class WaterAllocationWidget(QWidget):
 
         demands = self._calc_demands()
         agr_demand = (demands[SECTOR_AGR] if demands else 1.0) * 1_000_000
-        alpha = 0.5
+        # 抬高农业经济权重: alpha 0.5→1.0, 并设下限 6.0 (接近工业 9.0),
+        # 使优化器有动力稳定农业分配, 避免其在 [0.2D, 2.5D] 区间内剧烈抖动。
+        alpha = 1.0
+        AGR_MARGIN_FLOOR = 6.0
         a_agr = (total_revenue / agr_demand) * alpha if agr_demand > 0 else 0.8
+        a_agr = max(a_agr, AGR_MARGIN_FLOOR)
         a_dom, a_eco, a_ind = 1.1, 1.0, 9.0
         a_down = 1e-9
 
@@ -1134,7 +1151,7 @@ class WaterAllocationWidget(QWidget):
             if self.current_monthly_inflow is not None:
                 monthly_inflow = np.asarray(self.current_monthly_inflow)
             else:
-                monthly_inflow = np.full(12, 300.0)
+                monthly_inflow = np.full(12, 500.0)  #默认径流量
 
             W_supply = np.zeros((n_periods, 2))
             for t in range(n_periods):
@@ -1170,7 +1187,7 @@ class WaterAllocationWidget(QWidget):
                 "n_periods": n_periods, "time_scale": time_scale,
                 "a": a_matrix, "b": b_matrix, "T": T_weights,
                 "D": D_demand, "W": W_supply,
-                "F_min": D_demand * 0.2, "F_max": D_demand * 2.5,
+                "F_min": D_demand * 0.3, "F_max": D_demand * 1.5,
                 "loss_rates": loss_rates,
             }
 

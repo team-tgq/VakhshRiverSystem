@@ -161,7 +161,7 @@ def predict_downstream_total(target_year):
 
     # --- 合并 ---
     total_annual = tkm_annual + uzb_annual + afg_annual
-    total_monthly = distribute_to_months(total_annual) * DOWNSTREAM_SHARE_FACTOR
+    total_monthly = distribute_to_months(total_annual) 
 
     return {
         'downstream_monthly': total_monthly,

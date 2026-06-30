@@ -465,22 +465,30 @@ def calculate_monthly_demands(
     et0_daily: float,
     crop_rows: List[dict],
     fao_kc: Dict[str, Dict[str, float]],
+    target_year: int = 2026,
+    urban_quota: float = 145.0,
+    rural_quota: float = 80.0,
 ) -> Dict[str, float]:
-    """计算月度各部门需水量"""
-    _ = eco_base
+    """计算月度各部门需水量 
 
+    urban_quota / rural_quota: 城市/农村人均用水定额 (L/天), 默认 145 / 80
+    target_year: 下游国家径流预测目标年份
+    """
     days_in_month = calendar.monthrange(2026, int(month))[1]
     pop = float(pop_wan) * 10000
     urban_rate = float(urban_rate_percent) / 100.0
     reuse_rate = float(reuse_percent) / 100.0
 
+    # 生活: 可配置人均用水定额 (L/天)
     pop_urban = pop * urban_rate
     pop_rural = pop * (1 - urban_rate)
-    live_m3 = (pop_urban * 0.145 + pop_rural * 0.08) * days_in_month
+    live_m3 = (pop_urban * urban_quota / 1000 + pop_rural * rural_quota / 1000) * days_in_month
     live = live_m3 / 1_000_000
 
-    eco = 0.1 * live
+    # 生态: 关联生活用水 + 生态保障基数
+    eco = 0.1 * live + float(eco_base)
 
+    # 农业: 面积单位 km² → m²
     agr = 0.0
     for crop in crop_rows:
         area_str = str(crop.get("area", "")).strip()
@@ -489,22 +497,35 @@ def calculate_monthly_demands(
         try:
             crop_type = str(crop["type"])
             crop_stage = str(crop["stage"])
-            area_mu = float(area_str) * 10000
+            c_area = float(area_str) * 1_000_000  # km² → m²
             kc = float(fao_kc[crop_type][crop_stage])
         except (KeyError, ValueError, TypeError):
             continue
 
         etc_monthly = kc * et0_daily * days_in_month
-        water_m3 = etc_monthly * 0.001 * area_mu * 666.67 * 0.6
+        water_m3 = etc_monthly * 0.001 * c_area
         agr += (water_m3 / 1_000_000) / irrigation_eff if irrigation_eff > 0 else 0.0
 
-    ind = (float(gdp_yi) * 130 / 100) * (1 - reuse_rate) / 12
+    # 工业: 万元GDP定额 140 m³ + 季节系数 
+    INDUSTRIAL_WATER_QUOTA = 140
+    annual_industrial_water = float(gdp_yi) * 10000 * INDUSTRIAL_WATER_QUOTA * (1 - reuse_rate)
+    season_factors = [0.85, 0.80, 0.90, 0.95, 1.05, 1.10, 1.15, 1.15, 1.05, 0.95, 0.85, 0.80]
+    ind = annual_industrial_water * season_factors[int(month) - 1] / 12 / 1_000_000
+
+    # 下游国家: LSTM 合并月径流预测 (Billion m³ → 百万m³)
+    try:
+        result = predict_downstream_total(int(target_year))
+        downstream = float(result['downstream_monthly'][int(month) - 1]) * 1000
+    except Exception as e:
+        print(f"下游国家预测数据获取失败: {e}")
+        downstream = 0.0
 
     return {
         SECTOR_LIVE: round(live, 2),
         SECTOR_ECO: round(eco, 2),
         SECTOR_AGR: round(agr, 2),
         SECTOR_IND: round(ind, 2),
+        SECTOR_DOWN: round(downstream, 2),
     }
 
 
@@ -535,8 +556,12 @@ def estimate_economic_params(
         total_revenue_yuan += area_mu * crop_yield * crop_price
 
     agr_water_demand_m3 = float(agr_water_demand_million_m3) * 1_000_000
-    alpha = 0.5
+    # 抬高农业经济权重: alpha 0.5→1.0, 并设下限 6.0 (接近工业 9.0),
+    # 使优化器有动力稳定农业分配, 避免其在 [0.2D, 2.5D] 区间内剧烈抖动。
+    alpha = 1.0
+    AGR_MARGIN_FLOOR = 6.0
     a_agr = (total_revenue_yuan / agr_water_demand_m3) * alpha if agr_water_demand_m3 > 0 else 0.8
+    a_agr = max(a_agr, AGR_MARGIN_FLOOR)
 
     a_dom, a_eco, a_ind = 1.1, 1.0, 9.0
     a_surface = [a_dom + a_hydro, a_eco + a_hydro, a_agr + a_hydro, a_ind + a_hydro]
@@ -544,167 +569,3 @@ def estimate_economic_params(
     a_ground = [a_dom, a_eco, a_agr, a_ind]
     b_ground = [a_dom + 0.4, 0.1, a_agr + 0.3, a_ind + 0.5]
     return np.array([a_surface, a_ground]), np.array([b_surface, b_ground]), a_hydro, a_agr
-
-
-# ============================================================
-# 第四部分  旧版兼容接口 (供 PyQt5 插件使用)
-# ============================================================
-
-def run_water_allocation_optimization(input_data: Dict) -> Dict:
-    """旧版接口: 运行单时段 (4部门) NSGA-II 水资源分配优化"""
-    month = int(input_data["month"])
-    W_supply = np.array([float(input_data["w_surface"]), float(input_data["w_ground"])], dtype=float)
-
-    D_demand = np.zeros((1, 4), dtype=float)
-    for idx, sec in enumerate(SECTOR_ORDER):
-        D_demand[0, idx] = float(input_data["demands"][sec])
-
-    loss_rates = np.zeros(1, dtype=float)
-    loss_rates[0] = float(input_data["loss_percent"]) / 100.0
-
-    a_matrix, b_matrix, a_hydro, a_agr = estimate_economic_params(
-        crop_rows=input_data["crop_rows"],
-        agr_water_demand_million_m3=float(input_data["demands"][SECTOR_AGR]),
-        hydro_pmax=float(input_data["hydro_pmax"]),
-        hydro_qmax=float(input_data["hydro_qmax"]),
-        hydro_price=float(input_data["hydro_price"]),
-    )
-
-    raw_f_min = D_demand * 0.6
-    total_min_required = float(raw_f_min.sum())
-    total_receivable = float(W_supply[0] * max(0.0, 1.0 - loss_rates[0]) + W_supply[1])
-    if total_min_required > 0 and total_min_required > total_receivable:
-        relax_ratio = max(0.0, total_receivable / total_min_required) * 0.999
-        F_min = raw_f_min * relax_ratio
-    else:
-        F_min = raw_f_min
-
-    F_max = np.maximum(D_demand * 1.2, F_min + 1e-6)
-
-    problem_params = {
-        "n_sources": 2,
-        "n_regions": 1,
-        "m_sectors": 4,
-        "a": a_matrix,
-        "b": b_matrix,
-        "T": np.array([1, 1, 1, 1], dtype=float),
-        "D": D_demand,
-        "W": W_supply,
-        "F_min": F_min,
-        "F_max": F_max,
-        "loss_rates": loss_rates,
-    }
-
-    res = run_nsga2_opt(problem_params)
-    if res is None or res.F is None or res.X is None:
-        problem_params["F_min"] = np.zeros_like(D_demand)
-        problem_params["F_max"] = np.maximum(D_demand * 1.2, 1e-6)
-        res = run_nsga2_opt(problem_params)
-    if res is None or res.F is None or res.X is None:
-        raise RuntimeError("NSGA-II 未生成有效解，请检查供水、需水与损耗参数。")
-
-    pref_weights = np.array(
-        [
-            float(input_data["w_econ"]),
-            float(input_data["w_short"]),
-            float(input_data["w_gini"]),
-        ],
-        dtype=float,
-    )
-    F = np.atleast_2d(np.asarray(res.F, dtype=float))
-    X = np.atleast_2d(np.asarray(res.X, dtype=float))
-    if F.shape[0] != X.shape[0]:
-        raise RuntimeError("NSGA-II 返回结果维度异常。")
-    if F.shape[1] < 3:
-        raise RuntimeError("NSGA-II 返回目标维度不足。")
-    if X.shape[1] != 8:
-        raise RuntimeError("NSGA-II 返回决策变量维度异常。")
-
-    F_min_norm = F.min(axis=0)
-    F_max_norm = F.max(axis=0)
-    F_range = np.where(F_max_norm - F_min_norm == 0, 1e-9, F_max_norm - F_min_norm)
-    best_idx = int(np.argmin(np.linalg.norm(((F - F_min_norm) / F_range) * pref_weights, axis=1)))
-
-    return {
-        "month": month,
-        "profit": float(-F[best_idx, 0]),
-        "shortage": float(F[best_idx, 1]),
-        "gini": float(F[best_idx, 2]),
-        "X_opt": X[best_idx].reshape((2, 1, 4)),
-        "D_demand": D_demand,
-        "loss_rates": loss_rates,
-        "W_supply": W_supply,
-        "a_hydro": float(a_hydro),
-        "a_agr": float(a_agr),
-        "res": res,
-    }
-
-
-def format_result_text(result: Dict, sectors: List[str]) -> str:
-    """格式化单时段 NSGA-II 结果文本"""
-    month = int(result["month"])
-    profit = float(result["profit"])
-    shortage = float(result["shortage"])
-    gini = float(result["gini"])
-    X_opt = np.asarray(result["X_opt"], dtype=float)
-    D = np.asarray(result["D_demand"], dtype=float)
-    loss = np.asarray(result["loss_rates"], dtype=float)
-    W = np.asarray(result["W_supply"], dtype=float)
-    a_hydro = float(result["a_hydro"])
-
-    if gini < 0.1:
-        gini_diag = "(完全公平)"
-    elif gini < 0.2:
-        gini_diag = "(满意度较均衡)"
-    elif gini < 0.3:
-        gini_diag = "(分配偏向高产值部门)"
-    else:
-        gini_diag = "(偏科严重，存在明显受损部门)"
-
-    lines = [
-        f"第 {month} 月哈特隆州配水优化方案",
-        "=" * 85,
-        f"系统总综合经济效益: {profit:,.2f} 万元",
-        f"系统总缺水量      : {shortage:,.2f} 百万m³",
-        f"部门公平性(Gini)  : {gini:.4f} {gini_diag}",
-        "=" * 85,
-        f"地区: 哈特隆州 (管网传输损耗率: {loss[0] * 100:.1f}%)",
-        f"{'部门':<10} | {'需水量':<10} | {'水库放水量':<10} | {'最终实收水量':<10} | {'满足率'}",
-        "-" * 75,
-    ]
-
-    for j, sec in enumerate(sectors):
-        demand = D[0, j]
-        surf_out = X_opt[0, 0, j]
-        received = surf_out * (1 - loss[0]) + X_opt[1, 0, j]
-        ratio = (received / demand * 100) if demand > 0 else 100.0
-        lines.append(f"{sec:<10} | {demand:<13.2f} | {surf_out:<15.2f} | {received:<16.2f} | {ratio:.1f}%")
-
-    total_surf = float(X_opt[0, 0, :].sum())
-    total_hydro_profit = total_surf * a_hydro
-    lines.extend(
-        [
-            "",
-            "=" * 85,
-            f"水库大坝放水总量: {total_surf:.2f} / {W[0]:.2f} 百万m³",
-            f"区域地下水抽水量: {X_opt[1, 0, :].sum():.2f} / {W[1]:.2f} 百万m³",
-            f"大坝水力发电独立贡献: 约 {total_hydro_profit:,.2f} 万元",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def run_dam_scheduling_optimization(input_data: Dict) -> Dict:
-    """
-    大坝调度优化 (已废弃, 由多时间尺度 NSGA-II 替代)
-    保留接口兼容性, 返回空结果并提示
-    """
-    raise NotImplementedError(
-        "NSGA-III 大坝调度优化已在 v2.0 中移除。"
-        "请使用多时间尺度 NSGA-II (NurekWaterAllocation) 替代,"
-        "结合 NurekDamParameters 进行径流预测。"
-    )
-
-
-def format_dam_result_text(result: Dict) -> str:
-    raise NotImplementedError("NSGA-III 调度已在 v2.0 中移除。")

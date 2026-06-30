@@ -37,11 +37,6 @@ from .core import (
     calculate_et0,
     calculate_monthly_demands,
     estimate_economic_params,
-    # 旧版兼容接口
-    run_water_allocation_optimization,
-    run_dam_scheduling_optimization,
-    format_result_text,
-    format_dam_result_text,
 )
 from .lstm_model import Seq2SeqLSTM, FEATURE_COLS_FINAL, FEATURE_COLS_RAW
 from .train import train_from_external_data
@@ -81,9 +76,4 @@ __all__ = [
     "calculate_et0",
     "calculate_monthly_demands",
     "estimate_economic_params",
-    # 兼容
-    "run_water_allocation_optimization",
-    "run_dam_scheduling_optimization",
-    "format_result_text",
-    "format_dam_result_text",
 ]

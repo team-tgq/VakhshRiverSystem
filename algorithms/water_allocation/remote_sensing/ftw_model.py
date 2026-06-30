@@ -85,20 +85,29 @@ def preprocess_s2_l2a(data):
         raise ValueError(f"不支持的波段数: {num_bands}, 期望 4 或 8")
 
 
-def compute_ndvi_mask(data_8ch, threshold=0.3):
-    """从 8 通道 FTW 输入计算 NDVI 植被掩膜"""
-    sr = data_8ch * FTW_NORM_SCALE
+def compute_ndvi_mask(data, threshold=0.3):
+    """从 FTW 输入计算 NDVI 植被掩膜, 自动适配 4 波段(单日期)/8 波段(双日期)。
+
+    波段约定: 每个日期内 索引0=B4(红), 索引3=B8(近红)。
+    - 8 波段: 前 4 为日期A、后 4 为日期B, 取两期 NDVI 的逐像素最大值;
+    - 4 波段(单日期/伪双时相): 仅用当期 NDVI。
+    """
+    sr = data * FTW_NORM_SCALE
+    num_bands = sr.shape[0]
+    eps = 1e-6
 
     b4_a = sr[0].astype(np.float64)
     b8_a = sr[3].astype(np.float64)
-    b4_b = sr[4].astype(np.float64)
-    b8_b = sr[7].astype(np.float64)
-
-    eps = 1e-6
     ndvi_a = (b8_a - b4_a) / (b8_a + b4_a + eps)
-    ndvi_b = (b8_b - b4_b) / (b8_b + b4_b + eps)
 
-    ndvi_max = np.maximum(ndvi_a, ndvi_b)
+    if num_bands >= 8:
+        b4_b = sr[4].astype(np.float64)
+        b8_b = sr[7].astype(np.float64)
+        ndvi_b = (b8_b - b4_b) / (b8_b + b4_b + eps)
+        ndvi_max = np.maximum(ndvi_a, ndvi_b)
+    else:
+        ndvi_max = ndvi_a
+
     valid = (sr[0] > 0) & (sr[0] != -9999 / FTW_NORM_SCALE)
     vegetation_mask = (ndvi_max >= threshold) & valid
     return vegetation_mask
@@ -206,6 +215,19 @@ def _rasterize_window_mask(src, win, polygon, all_touched=True):
     return mask.astype(bool)
 
 
+def _reproject_geometry(geom, src_crs, dst_crs):
+    """将 shapely 几何从 src_crs 重投影到 dst_crs (CRS 不同时才转换)。"""
+    from pyproj import CRS, Transformer
+    from shapely.ops import transform as shp_transform
+
+    src = CRS.from_user_input(src_crs)
+    dst = CRS.from_user_input(dst_crs)
+    if src == dst:
+        return geom
+    transformer = Transformer.from_crs(src, dst, always_xy=True)
+    return shp_transform(transformer.transform, geom)
+
+
 def calculate_cropland_area(
     image_path,
     model,
@@ -216,8 +238,20 @@ def calculate_cropland_area(
     band_indices=None,
     mask_geometry=None,
     ndvi_threshold=0.3,
+    mask_crs='EPSG:4326',
+    progress_callback=None,
+    forward_lock=None,
 ):
-    """使用滑动窗口在大型遥感影像上进行 FTW 推理, 计算耕地面积"""
+    """使用滑动窗口在大型遥感影像上进行 FTW 推理, 计算耕地面积。
+
+    mask_geometry 默认按 mask_crs (GeoJSON 标准 EPSG:4326) 解释, 会自动
+    重投影到当前影像的 CRS, 以兼容 UTM/经纬度等不同坐标系的瓦片。
+
+    progress_callback(done, total, field_pixels, fname): 可选, 每隔若干窗口
+        回调一次, 用于 UI 实时反馈, 避免界面看起来"卡住"。
+    forward_lock: 可选 threading.Lock, 多线程并行处理多个瓦片且共用同一个
+        CUDA 模型时, 用它串行化 model() 前向, 防止并发推理导致卡死/崩溃。
+    """
     if band_indices is None:
         band_indices = FTW_BAND_INDICES
     if window_size % 32 != 0:
@@ -229,6 +263,14 @@ def calculate_cropland_area(
 
     with rasterio.open(image_path) as src:
         pixel_area_sqm = _compute_pixel_area_sqm(src)
+        fname = os.path.basename(image_path)
+
+        # 掩膜与影像坐标系对齐: 把掩膜重投影到影像 CRS, 否则相交判断恒为 False
+        if mask_geometry is not None and src.crs is not None:
+            try:
+                mask_geometry = _reproject_geometry(mask_geometry, mask_crs, src.crs)
+            except Exception as e:
+                print(f"警告: 掩膜重投影失败 ({e}), 按影像原始坐标直接使用")
 
         width = src.width
         height = src.height
@@ -247,6 +289,18 @@ def calculate_cropland_area(
 
         for row in range(0, height, stride):
             for col in range(0, width, stride):
+                # 每个窗口先计数并上报进度 (含被跳过的窗口), 保证 UI 持续有反馈
+                window_count += 1
+                if window_count % 25 == 0 or window_count == total_windows:
+                    pct = window_count / total_windows * 100
+                    print(f"进度: {window_count}/{total_windows} ({pct:.1f}%)  "
+                          f"当前耕地像素: {total_field_pixels:,}", end='\r')
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(window_count, total_windows, total_field_pixels, fname)
+                        except Exception:
+                            pass
+
                 win_w = min(window_size, width - col)
                 win_h = min(window_size, height - row)
                 win = Window(col, row, win_w, win_h)
@@ -257,14 +311,12 @@ def calculate_cropland_area(
                     data = src.read(band_indices, window=win)
 
                 if np.all(data == 0) or np.all(data == -9999):
-                    window_count += 1
                     continue
 
                 geo_mask = None
                 if mask_geometry is not None:
                     geo_mask = _rasterize_window_mask(src, win, mask_geometry)
                     if geo_mask is None or not geo_mask.any():
-                        window_count += 1
                         continue
 
                 tensor_data, _ = preprocess_s2_l2a(data)
@@ -277,7 +329,12 @@ def calculate_cropland_area(
                 tensor_padded, padding = _pad_to_multiple(tensor_data, multiple=32)
 
                 with torch.no_grad():
-                    pred = model(tensor_padded)
+                    # 多线程共用同一 CUDA 模型时串行化前向, 防止并发卡死
+                    if forward_lock is not None:
+                        with forward_lock:
+                            pred = model(tensor_padded)
+                    else:
+                        pred = model(tensor_padded)
                     pred = _crop_padding(pred, padding)
 
                     if num_classes == 2:
@@ -293,12 +350,6 @@ def calculate_cropland_area(
 
                     field_pixels = field_mask.sum().item()
                     total_field_pixels += field_pixels
-
-                window_count += 1
-                if window_count % 50 == 0:
-                    pct = window_count / total_windows * 100
-                    print(f"进度: {window_count}/{total_windows} ({pct:.1f}%)  "
-                          f"当前耕地像素: {total_field_pixels:,}", end='\r')
 
     print(f"\n推理完成! 共处理 {window_count} 个窗口")
     print(f"耕地总像素数: {total_field_pixels:,}")
