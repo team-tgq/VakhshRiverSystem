@@ -36,6 +36,7 @@ from algorithms.snow_state import (
     submit_runoff_warning_export,
 )
 from app.digital_twin_standard import (
+    DEFAULT_PERIOD,
     TARGET_CRS,
     default_run_context,
     mark_module_complete,
@@ -62,8 +63,8 @@ def _context_from_target_date(date_text: str | None):
         period = text[:6]
         month = int(period[4:6])
     else:
-        period = "200503"
-        month = 3
+        period = DEFAULT_PERIOD
+        month = int(period[4:6])
 
     if 3 <= month <= 5:
         period_name = "融雪模拟"

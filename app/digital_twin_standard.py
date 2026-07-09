@@ -11,13 +11,21 @@ from typing import Iterable, Mapping, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_TWIN_DATA_ROOT = PROJECT_ROOT / "sample_data" / "瓦赫什流域孪生数据"
+REAL_TWIN_DATA_ROOT = PROJECT_ROOT / "data" / "瓦赫什流域孪生数据"
 TWIN_DATA_ROOT_ENV = "VAKHSH_TWIN_DATA_ROOT"
+
+
+def _resolve_data_root(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    return path.resolve()
 
 
 def configured_twin_data_root() -> Path:
     env_value = os.getenv(TWIN_DATA_ROOT_ENV, "").strip()
     if env_value:
-        return Path(env_value).expanduser().resolve()
+        return _resolve_data_root(env_value)
 
     try:
         from config import TWIN_DATA_ROOT
@@ -26,9 +34,9 @@ def configured_twin_data_root() -> Path:
 
     config_value = str(TWIN_DATA_ROOT).strip()
     if config_value:
-        return Path(config_value).expanduser().resolve()
+        return _resolve_data_root(config_value)
 
-    return SAMPLE_TWIN_DATA_ROOT
+    return REAL_TWIN_DATA_ROOT
 
 
 DEFAULT_TWIN_DATA_ROOT = configured_twin_data_root()
@@ -43,8 +51,8 @@ DATE_FORMAT = "YYYY-MM-DD"
 
 DEFAULT_SCHEME = "scheme01"
 DEFAULT_SCHEME_NAME = "常规调度工况"
-DEFAULT_PERIOD = "200503"
-DEFAULT_PERIOD_NAME = "融雪模拟"
+DEFAULT_PERIOD = "201707"
+DEFAULT_PERIOD_NAME = "汛期模拟"
 
 RAW_TO_PROCESSED_PERIOD_NAMES = {
     "融雪期": "融雪模拟",
@@ -507,6 +515,7 @@ __all__ = [
     "MODULE_SPECS",
     "RAW_TO_PROCESSED_PERIOD_NAMES",
     "SAMPLE_TWIN_DATA_ROOT",
+    "REAL_TWIN_DATA_ROOT",
     "STANDARD_FIELDS",
     "STUDY_YEAR_END",
     "STUDY_YEAR_START",

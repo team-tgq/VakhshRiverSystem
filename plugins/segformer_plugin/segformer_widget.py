@@ -18,6 +18,7 @@ from rasterio.enums import Resampling
 from algorithms.segformer_service.service_config import TASKS
 from algorithms.segformer_service.service_runner import run_segformer_service
 from app.digital_twin_standard import (
+    DEFAULT_PERIOD,
     TARGET_CRS,
     default_run_context,
     mark_module_complete,
@@ -35,7 +36,7 @@ DEFAULT_SNOW_DEPTH_M = 0.10
 def _context_from_output_path(path: str | Path):
     token = Path(path).stem.split("_", 1)[0]
     if not token.isdigit() or len(token) < 6:
-        token = "200503"
+        token = DEFAULT_PERIOD
     period = token[:8] if len(token) >= 8 else token[:6]
     month = int(period[4:6]) if len(period) >= 6 else 3
     if 3 <= month <= 5:

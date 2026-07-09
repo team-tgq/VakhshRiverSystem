@@ -15,7 +15,8 @@
 本次已在项目中落地：
 
 - `app/digital_twin_standard.py`：统一 CRS、时间、字段单位、模块链路和成果目录工具。
-- `sample_data/瓦赫什流域孪生数据/`：轻量样例数据树，演示 baseline/raw/processed 目录结构。
+- `data/瓦赫什流域孪生数据/`：正式真实数据目录，由 `tools/prepare_real_twin_data.py` 在本地生成，不进入 Git。
+- `sample_data/瓦赫什流域孪生数据/`：轻量样例数据树，只演示 baseline/raw/processed 目录结构，不得作为真实计算数据。
 - 插件加载顺序：按 M01/M06/M02/M03/M09/M08/M07/M04/M05 的业务链路排序。
 
 ## 2. 全局数据规范
@@ -47,6 +48,8 @@
 - `raw/`：瓦赫什流域原始观测数据，按年份和时段组织。
 - `processed/`：各模块成果数据，按方案和时段组织。
 - 演示参考数据不得混入正式计算目录。若需要保留参考数据，应单独放在 `reference/` 或在文件名、元数据中标明 `demo_only=true`。
+- 真实数据接入顺序：优先使用本地已有真实数据；本地没有标准 raw 时，再在 2005-2017 研究期内选择可追溯公开数据下载。
+- `200503_哨兵影像.tif` 不能作为真实 Sentinel 数据使用；Sentinel-1/2 在 2005 年尚无对应观测。若业务必须覆盖 2005 年，应使用 Landsat、MODIS 等当年存在的真实数据源，并在文件名或元数据中写清来源。
 
 ## 3. 标准目录结构
 
@@ -58,32 +61,34 @@
 │  ├─ 水库边界.shp
 │  └─ DEM.tif
 ├─ raw/
-│  ├─ 200503_融雪期/
-│  │  ├─ 200503_哨兵影像.tif
-│  │  ├─ 200503_SAR影像.tif
-│  │  ├─ 200503_逐日气象.csv
-│  │  ├─ 200503_水库参数.csv
-│  │  └─ 200503_河道视频.mp4
-│  └─ 201707_汛期/
-│     ├─ 201707_哨兵影像.tif
-│     ├─ 201707_逐日气象.csv
-│     └─ 201707_水库参数.csv
+│  ├─ YYYYMM_融雪期/
+│  │  ├─ YYYYMM_哨兵影像.tif
+│  │  ├─ YYYYMM_SAR影像.tif
+│  │  ├─ YYYYMM_逐日气象.csv
+│  │  └─ YYYYMM_水库参数.csv
+│  └─ YYYYMM_汛期/
+│     ├─ YYYYMM_哨兵影像.tif
+│     ├─ YYYYMM_SAR影像.tif
+│     ├─ YYYYMM_逐日气象.csv
+│     └─ YYYYMM_水库参数.csv
 └─ processed/
    ├─ scheme01_常规调度工况/
-   │  ├─ 200503_融雪模拟/
+   │  ├─ YYYYMM_融雪模拟/
    │  │  ├─ raster/
    │  │  ├─ table/
-   │  │  └─ finish.tag
-   │  └─ 201707_汛期模拟/
+   │  │  └─ finish.tag  # 模块真实运行完成后生成
+   │  └─ YYYYMM_汛期模拟/
    │     ├─ raster/
    │     ├─ table/
-   │     └─ finish.tag
+   │     └─ finish.tag  # 模块真实运行完成后生成
    └─ scheme02_优化分水工况/
-      └─ 200503_融雪模拟/
+      └─ YYYYMM_融雪模拟/
          ├─ raster/
          ├─ table/
-         └─ finish.tag
+         └─ finish.tag  # 模块真实运行完成后生成
 ```
+
+当前仓库脚本在本机未发现标准 raw 时，默认用 `--fallback-year 2017` 生成 `201703_融雪期` 与 `201707_汛期` 两个真实公开数据时段；这只是自动下载示例，不是目录规范指定年份。
 
 ## 4. 字段与单位
 
@@ -204,9 +209,14 @@ mark_module_complete(context, "M05")
 仓库提供了轻量校验脚本，用于检查样例或正式目录是否满足本规范：
 
 ```bash
-python tools/validate_twin_data.py
+python tools/prepare_real_twin_data.py --resolution-m 1000
+python tools/prepare_real_twin_data.py --local-raw-root "D:/path/to/已有真实raw" --fallback-year 2017
+python tools/validate_twin_data.py --stage baseline-raw
+python tools/validate_twin_data.py --stage full
 python tools/validate_twin_data.py "D:/path/to/瓦赫什流域孪生数据"
 ```
+
+`prepare_real_twin_data.py` 会优先使用本地真实 `raw`，本地缺失时再下载研究期内可追溯公开数据。`baseline-raw` 阶段只校验基础数据和原始观测数据；`full` 阶段要求各模块已经写入真实 `processed` 成果、旁路元数据和 `finish.tag`。
 
 主程序也提供了界面校验入口：
 
@@ -232,10 +242,10 @@ python main.py
 
 - `baseline/raw/processed` 三类目录是否存在。
 - baseline 是否包含流域边界、河网、水库边界和 DEM。
-- baseline 矢量文件是否为 `EPSG:32642`，河网、水库边界和 DEM 是否位于流域边界范围内。
+- baseline 矢量文件是否为 `EPSG:32642`，河网、水库边界是否位于流域边界范围内，DEM 和 raw 影像是否覆盖流域范围。
 - raw 是否按 `YYYYMM_业务时段` 或 `YYYYMMDD_业务时段` 组织，并检查目录内栅格、表格等文件。
-- processed 是否按“方案 -> 时段 -> raster/table”组织；时段名称动态扫描，不限定仓库样例中的 `200503`、`201707`。
-- GeoTIFF 坐标系是否为 `EPSG:32642`，范围是否位于流域边界内。
+- processed 是否按“方案 -> 时段 -> raster/table”组织；时段名称动态扫描，不限定旧样例或自动下载示例中的具体年份。
+- GeoTIFF 坐标系是否为 `EPSG:32642`；baseline/raw 需要覆盖流域，processed 成果应裁剪或对齐到流域范围。
 - CSV 是否包含统一时间字段 `date`，日期是否为 `YYYY-MM-DD`，年份是否位于 2005-2017。
 - 栅格、表格和报表成果是否有 `.meta.json`，并声明坐标系、时间步长、时间字段、来源文件、模块编号、字段和单位；字段和单位必须与 `app.digital_twin_standard.STANDARD_FIELDS` 一致。
 - 正式数据目录不得混入 `demo_only=true` 的演示参考数据；仓库 `sample_data` 目录允许保留 `demo_only=true` 作为样例标识。

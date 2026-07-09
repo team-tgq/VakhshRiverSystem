@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.digital_twin_standard import (
+    DEFAULT_PERIOD,
     TARGET_CRS,
     default_run_context,
     mark_module_complete,
@@ -63,8 +64,8 @@ def _business_date_to_context(business_date: str | None):
         day = int(date_text[8:10])
         period = f"{year:04d}{month:02d}{day:02d}"
     else:
-        period = date_text.replace("-", "") or "200503"
-        month = int(period[4:6]) if len(period) >= 6 and period[4:6].isdigit() else 3
+        period = date_text.replace("-", "") or DEFAULT_PERIOD
+        month = int(period[4:6]) if len(period) >= 6 and period[4:6].isdigit() else int(DEFAULT_PERIOD[4:6])
 
     if 3 <= month <= 5:
         period_name = "融雪模拟"

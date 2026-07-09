@@ -22,6 +22,7 @@ from PyQt5.QtWidgets import (
 
 from algorithms.reservoir_estimation.reservoir_core import NurekReservoirEstimator, save_curve_plot
 from app.digital_twin_standard import (
+    DEFAULT_PERIOD,
     default_run_context,
     mark_module_complete,
     module_output_path,
@@ -46,8 +47,8 @@ def _context_from_result_date(date_text: str | None):
         period = text[:6]
         month = int(period[4:6])
     else:
-        period = "200503"
-        month = 3
+        period = DEFAULT_PERIOD
+        month = int(period[4:6])
 
     if 3 <= month <= 5:
         period_name = "融雪模拟"

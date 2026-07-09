@@ -217,19 +217,44 @@ algorithms/snow_state/
 ```text
 app/digital_twin_standard.py
 docs/digital_twin_integration_standard.md
+data/瓦赫什流域孪生数据/        # 正式真实数据目录，本地生成，不进入 Git
 sample_data/瓦赫什流域孪生数据/
+tools/prepare_real_twin_data.py
 tools/validate_twin_data.py
 ```
 
-可用下面命令校验样例数据或正式数据目录是否满足统一规范：
+正式数据不再使用 `sample_data`。`sample_data/瓦赫什流域孪生数据` 只作为目录模板和演示样例，内部文件带 `demo_only=true`，不能作为真实计算数据。
+
+首次准备真实公共数据目录：
 
 ```bash
-python tools/validate_twin_data.py
+python tools/prepare_real_twin_data.py --resolution-m 1000
+python tools/prepare_real_twin_data.py --local-raw-root "D:/path/to/已有真实raw" --fallback-year 2017
+```
+
+该脚本会生成 `data/瓦赫什流域孪生数据`。数据选择原则是：优先扫描并接入本地已有真实 `raw/{YYYYMM_时段}`；本地没有标准 raw 时，再在 2005-2017 研究期内选择可下载公开数据补齐。
+
+当前已接入的真实基础数据：
+
+- `baseline/流域边界.shp`、`baseline/DEM.tif`：来自本机 `E:/PycharmProject/Experiment/Data/瓦赫什河`，统一重投影到 `EPSG:32642`。
+- `baseline/河网.shp`：来自本机 HydroRIVERS 数据，裁剪到瓦赫什流域。
+- `baseline/水库边界.shp`：来自 OpenStreetMap Norak/Nurek Reservoir relation。
+- 本机未发现标准 raw 时，脚本默认以 `--fallback-year 2017` 下载 `201703_融雪期` 和 `201707_汛期`：Sentinel-2 L2A、Sentinel-1 RTC、NASA POWER 日尺度气象、Nurek 水库参数。这个年份不是规范要求，可改为 2015-2017 中可用的一年。
+
+注意：`200503_哨兵影像.tif` 不能作为真实 Sentinel 数据，因为 Sentinel-1/2 在 2005 年尚未提供观测；若要保留 2005 年业务时段，遥感源应改为 Landsat、MODIS 等当年存在的数据源。
+
+可用下面命令校验正式数据目录是否满足统一规范：
+
+```bash
+python tools/validate_twin_data.py --stage baseline-raw
+python tools/validate_twin_data.py --stage full
 python tools/validate_twin_data.py "D:/path/to/瓦赫什流域孪生数据"
 ```
 
-校验脚本会动态扫描 `raw/{YYYYMM_时段}` 和 `processed/{scheme}_{工况}/{YYYYMM_模拟}`，不会限定必须使用仓库样例中的 `200503` 或 `201707`；正式数据按实际业务年月命名即可。
-校验内容包括目录结构、baseline 矢量 CRS、GeoTIFF CRS 与流域范围、CSV 日期格式与 2005-2017 研究时段、成果 `.meta.json` 字段单位说明、正式目录是否混入 `demo_only` 演示数据，以及 `finish.tag`，用于确认模块成果能按统一标准互相调用。
+`baseline-raw` 只检查真实基础数据和原始观测数据；`full` 额外要求所有模块已经在 `processed/{scheme}_{工况}/{YYYYMM_模拟}` 写入标准成果和 `finish.tag`。正式 `processed` 目录初始应为空目录骨架，不允许预填模拟 GeoTIFF/CSV 伪装成模型成果。
+
+校验脚本会动态扫描 `raw/{YYYYMM_时段}` 和 `processed/{scheme}_{工况}/{YYYYMM_模拟}`，不会限定必须使用旧样例中的 `200503` 或 `201707`；正式数据按实际业务年月命名即可。
+校验内容包括目录结构、baseline 矢量 CRS、GeoTIFF CRS 与流域覆盖关系、CSV 日期格式与 2005-2017 研究时段、`.meta.json` 真实数据溯源、正式目录是否混入 `demo_only` 演示数据，以及 full 阶段的成果字段单位和 `finish.tag`。
 
 正式数据根目录可通过两种方式配置：
 

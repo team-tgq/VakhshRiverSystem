@@ -60,8 +60,19 @@ REQUIRED_METADATA_KEYS = (
     "source_files",
 )
 
+BASELINE_RAW_METADATA_KEYS = (
+    "file",
+    "data_role",
+    "data_status",
+    "source_name",
+    "source_files",
+    "crs",
+    "created_at",
+)
+
 BOUND_TOLERANCE_M = 1.0
 PY_DATE_FORMAT = "%Y-%m-%d"
+SIMULATED_STATUS_VALUES = {"demo", "demo_only", "mock", "sample", "simulated", "simulation"}
 
 
 class ValidationReport:
@@ -158,6 +169,10 @@ def _bounds_within(inner, outer, tolerance: float = BOUND_TOLERANCE_M) -> bool:
     )
 
 
+def _bounds_cover(outer, inner, tolerance: float = BOUND_TOLERANCE_M) -> bool:
+    return _bounds_within(inner, outer, tolerance)
+
+
 def _bounds_tuple(bounds) -> tuple[float, float, float, float]:
     if hasattr(bounds, "left"):
         return (float(bounds.left), float(bounds.bottom), float(bounds.right), float(bounds.top))
@@ -179,6 +194,24 @@ def _check_bounds_within_watershed(
         report.error(
             "数据范围超出流域边界: "
             f"{path}，当前 {inner}，流域边界 {watershed_bounds}"
+        )
+
+
+def _check_bounds_cover_watershed(
+    report: ValidationReport,
+    path: Path,
+    bounds,
+    watershed_bounds: tuple[float, float, float, float] | None,
+) -> None:
+    if bounds is None or watershed_bounds is None:
+        return
+    outer = _bounds_tuple(bounds)
+    if _bounds_cover(outer, watershed_bounds):
+        report.ok(f"范围覆盖流域边界: {path.name}")
+    else:
+        report.error(
+            "数据范围未覆盖完整流域边界: "
+            f"{path}，当前 {outer}，流域边界 {watershed_bounds}"
         )
 
 
@@ -240,6 +273,7 @@ def _check_metadata_sidecar(
     module_code: str | None = None,
     *,
     allow_demo_only: bool = True,
+    strict_module: bool = True,
 ) -> None:
     metadata_path = path.with_suffix(path.suffix + ".meta.json")
     if not metadata_path.exists():
@@ -252,14 +286,36 @@ def _check_metadata_sidecar(
         report.error(f"元数据无法读取: {metadata_path} ({exc})")
         return
 
-    missing = [key for key in REQUIRED_METADATA_KEYS if key not in payload]
+    required_keys = REQUIRED_METADATA_KEYS if strict_module else BASELINE_RAW_METADATA_KEYS
+    missing = [key for key in required_keys if key not in payload]
     if missing:
+        if allow_demo_only and not strict_module:
+            report.warn(f"样例元数据为旧格式，仅作为模板保留: {metadata_path}，缺少 {missing}")
+            return
         report.error(f"元数据缺少字段 {missing}: {metadata_path}")
         return
 
     if payload.get("file") != path.name:
         report.error(f"元数据 file 与成果文件名不一致: {metadata_path}")
         return
+    if payload.get("demo_only") is True and not allow_demo_only:
+        report.error(f"正式数据目录不能混入 demo_only=true 的演示数据: {metadata_path}")
+        return
+
+    if not strict_module:
+        if not isinstance(payload.get("source_files"), list) or not payload["source_files"]:
+            report.error(f"元数据 source_files 不能为空: {metadata_path}")
+            return
+        status = str(payload.get("data_status", "")).strip().lower()
+        if not allow_demo_only and status in SIMULATED_STATUS_VALUES:
+            report.error(f"正式数据目录不能混入模拟/演示数据状态: {metadata_path}，data_status={status}")
+            return
+        if payload.get("crs") not in (TARGET_CRS, "not_applicable"):
+            report.error(f"元数据 CRS 不统一: {metadata_path}，当前 {payload.get('crs')}，应为 {TARGET_CRS}")
+            return
+        report.ok(f"元数据说明完整: {metadata_path.name}")
+        return
+
     if module_code and payload.get("module_code") != module_code:
         report.error(f"元数据 module_code 不一致: {metadata_path}，应为 {module_code}")
         return
@@ -289,11 +345,20 @@ def _check_metadata_sidecar(
     if not isinstance(payload.get("source_files"), list) or not payload["source_files"]:
         report.error(f"元数据 source_files 不能为空: {metadata_path}")
         return
-    if payload.get("demo_only") is True and not allow_demo_only:
-        report.error(f"正式数据目录不能混入 demo_only=true 的演示数据: {metadata_path}")
-        return
-
     report.ok(f"元数据说明完整: {metadata_path.name}")
+
+
+def _check_baseline_raw_metadata(
+    report: ValidationReport,
+    path: Path,
+    *,
+    allow_demo_only: bool,
+) -> None:
+    metadata_path = path.with_suffix(path.suffix + ".meta.json")
+    if allow_demo_only and not metadata_path.exists():
+        report.warn(f"样例数据缺少旁路元数据，仅作为模板保留: {metadata_path}")
+        return
+    _check_metadata_sidecar(report, path, allow_demo_only=allow_demo_only, strict_module=False)
 
 
 def _check_csv_date(report: ValidationReport, path: Path) -> None:
@@ -346,7 +411,7 @@ def _module_code_for_output(relative_output: str) -> str | None:
     return None
 
 
-def validate(root: Path) -> ValidationReport:
+def validate(root: Path, *, stage: str = "baseline-raw") -> ValidationReport:
     report = ValidationReport()
     root = root.expanduser().resolve()
     allow_demo_only = _is_sample_root(root)
@@ -373,15 +438,19 @@ def validate(root: Path) -> ValidationReport:
     dem = baseline / "DEM.tif"
     if dem.exists():
         bounds = _check_tif_crs(report, dem)
-        _check_bounds_within_watershed(report, dem, bounds, watershed_bounds)
-        _check_metadata_sidecar(report, dem, allow_demo_only=allow_demo_only)
+        _check_bounds_cover_watershed(report, dem, bounds, watershed_bounds)
+        _check_baseline_raw_metadata(report, dem, allow_demo_only=allow_demo_only)
 
     raw_period_dirs = sorted(path for path in raw.iterdir() if path.is_dir()) if raw.exists() else []
     if not raw_period_dirs:
         report.error(f"raw 下缺少按 年月_时段名称 组织的原始数据目录: {raw}")
     for period_dir in raw_period_dirs:
         _period_token_from_folder(report, period_dir, "raw")
-        period_files = sorted(path for path in period_dir.iterdir() if path.is_file())
+        period_files = sorted(
+            path
+            for path in period_dir.iterdir()
+            if path.is_file() and not path.name.endswith(".meta.json") and path.name.lower() != "readme.md"
+        )
         if not period_files:
             report.error(f"raw 时段目录为空: {period_dir}")
             continue
@@ -391,10 +460,17 @@ def validate(root: Path) -> ValidationReport:
                 continue
             if path.suffix.lower() == ".tif" and path.exists():
                 bounds = _check_tif_crs(report, path)
-                _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
-                _check_metadata_sidecar(report, path, allow_demo_only=allow_demo_only)
+                _check_bounds_cover_watershed(report, path, bounds, watershed_bounds)
+                _check_baseline_raw_metadata(report, path, allow_demo_only=allow_demo_only)
             if path.suffix.lower() == ".csv" and path.exists():
                 _check_csv_date(report, path)
+                _check_baseline_raw_metadata(report, path, allow_demo_only=allow_demo_only)
+            if path.suffix.lower() not in {".tif", ".csv"} and path.exists():
+                _check_baseline_raw_metadata(report, path, allow_demo_only=allow_demo_only)
+
+    if stage == "baseline-raw":
+        report.ok("已按 baseline/raw 阶段校验，processed 模型成果等待模块运行后再校验")
+        return report
 
     scheme_dirs = sorted(path for path in processed.iterdir() if path.is_dir()) if processed.exists() else []
     if not scheme_dirs:
@@ -459,11 +535,17 @@ def main() -> int:
         "root",
         nargs="?",
         default=str(DEFAULT_TWIN_DATA_ROOT),
-        help="瓦赫什流域孪生数据根目录，默认校验仓库 sample_data",
+        help="瓦赫什流域孪生数据根目录，默认校验正式 data 目录",
+    )
+    parser.add_argument(
+        "--stage",
+        choices=("baseline-raw", "full"),
+        default="baseline-raw",
+        help="baseline-raw 只校验真实基础/原始数据；full 额外要求 processed 已生成全部标准成果",
     )
     args = parser.parse_args()
 
-    report = validate(Path(args.root))
+    report = validate(Path(args.root), stage=args.stage)
     report.print()
     return 0 if report.success else 1
 
