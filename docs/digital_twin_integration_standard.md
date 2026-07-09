@@ -236,8 +236,9 @@ python main.py
 - raw 是否包含示例时段的遥感、气象、水库参数和河道视频。
 - processed 是否按“方案 -> 时段 -> raster/table”组织。
 - GeoTIFF 坐标系是否为 `EPSG:32642`，范围是否位于流域边界内。
-- CSV 是否包含统一时间字段 `date`。
-- 栅格、表格和报表成果是否有 `.meta.json`，并声明坐标系、时间步长、时间字段、来源文件、模块编号、字段和单位。
+- CSV 是否包含统一时间字段 `date`，日期是否为 `YYYY-MM-DD`，年份是否位于 2005-2017。
+- 栅格、表格和报表成果是否有 `.meta.json`，并声明坐标系、时间步长、时间字段、来源文件、模块编号、字段和单位；字段和单位必须与 `app.digital_twin_standard.STANDARD_FIELDS` 一致。
+- 正式数据目录不得混入 `demo_only=true` 的演示参考数据；仓库 `sample_data` 目录允许保留 `demo_only=true` 作为样例标识。
 - `finish.tag` 是否可读并包含完成模块列表。
 
 ## 9. 待刘老师或模块负责人确认事项

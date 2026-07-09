@@ -228,7 +228,7 @@ python tools/validate_twin_data.py
 python tools/validate_twin_data.py "D:/path/to/瓦赫什流域孪生数据"
 ```
 
-校验脚本会检查目录结构、baseline 矢量 CRS、GeoTIFF CRS 与流域范围、CSV 时间字段、成果 `.meta.json` 说明和 `finish.tag`，用于确认模块成果能按统一标准互相调用。
+校验脚本会检查目录结构、baseline 矢量 CRS、GeoTIFF CRS 与流域范围、CSV 日期格式与 2005-2017 研究时段、成果 `.meta.json` 字段单位说明、正式目录是否混入 `demo_only` 演示数据，以及 `finish.tag`，用于确认模块成果能按统一标准互相调用。
 
 正式数据根目录可通过两种方式配置：
 
