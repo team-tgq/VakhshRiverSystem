@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -8,7 +9,28 @@ from typing import Iterable
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_TWIN_DATA_ROOT = PROJECT_ROOT / "sample_data" / "瓦赫什流域孪生数据"
+SAMPLE_TWIN_DATA_ROOT = PROJECT_ROOT / "sample_data" / "瓦赫什流域孪生数据"
+TWIN_DATA_ROOT_ENV = "VAKHSH_TWIN_DATA_ROOT"
+
+
+def configured_twin_data_root() -> Path:
+    env_value = os.getenv(TWIN_DATA_ROOT_ENV, "").strip()
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+
+    try:
+        from config import TWIN_DATA_ROOT
+    except Exception:
+        TWIN_DATA_ROOT = ""
+
+    config_value = str(TWIN_DATA_ROOT).strip()
+    if config_value:
+        return Path(config_value).expanduser().resolve()
+
+    return SAMPLE_TWIN_DATA_ROOT
+
+
+DEFAULT_TWIN_DATA_ROOT = configured_twin_data_root()
 
 TARGET_CRS = "EPSG:32642"
 TARGET_CRS_NAME = "WGS84 UTM 42N"
@@ -274,13 +296,16 @@ __all__ = [
     "DATE_FORMAT",
     "DEFAULT_TWIN_DATA_ROOT",
     "MODULE_SPECS",
+    "SAMPLE_TWIN_DATA_ROOT",
     "STANDARD_FIELDS",
     "STUDY_YEAR_END",
     "STUDY_YEAR_START",
     "TARGET_CRS",
     "TARGET_CRS_NAME",
     "TIME_STEP",
+    "TWIN_DATA_ROOT_ENV",
     "baseline_dir",
+    "configured_twin_data_root",
     "ensure_processed_period",
     "iter_module_specs",
     "module_spec",

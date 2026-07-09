@@ -228,12 +228,27 @@ python tools/validate_twin_data.py
 python tools/validate_twin_data.py "D:/path/to/瓦赫什流域孪生数据"
 ```
 
+正式数据根目录可通过两种方式配置：
+
+```python
+# config.py
+TWIN_DATA_ROOT = "D:/path/to/瓦赫什流域孪生数据"
+```
+
+或在启动前设置环境变量：
+
+```powershell
+$env:VAKHSH_TWIN_DATA_ROOT = "D:/path/to/瓦赫什流域孪生数据"
+python main.py
+```
+
 ## 0 数据整理与流程总览
 
 - 插件目录：`plugins/integration_overview_plugin/`
 - 规范代码：`app/digital_twin_standard.py`
 - 功能：展示统一 CRS、研究时段、baseline/raw/processed 目录、字段单位和 M01-M09 调用链路
 - 样例数据：`sample_data/瓦赫什流域孪生数据/`
+- 可在界面中选择正式数据根目录并执行规范校验
 - 说明：该入口用于解决页面演示起点混乱问题，不直接替代各业务算法
 
 ## 1 SegFormer 专题识别

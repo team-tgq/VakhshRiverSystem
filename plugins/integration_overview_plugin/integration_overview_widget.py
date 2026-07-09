@@ -4,8 +4,10 @@ import os
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
+    QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTextEdit,
@@ -24,7 +26,9 @@ from app.digital_twin_standard import (
     TARGET_CRS,
     TARGET_CRS_NAME,
     TIME_STEP,
+    configured_twin_data_root,
 )
+from tools.validate_twin_data import validate
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +41,7 @@ class IntegrationOverviewWidget(QWidget):
         self.summary = QTextEdit()
         self.summary.setReadOnly(True)
         self.status_label = QLabel()
+        self.root_edit = QLineEdit(str(configured_twin_data_root()))
         self._init_ui()
         self.refresh_status()
 
@@ -53,11 +58,21 @@ class IntegrationOverviewWidget(QWidget):
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
+        root_row = QHBoxLayout()
+        root_row.addWidget(QLabel("数据根目录:"))
+        self.root_edit.setMinimumWidth(520)
+        self.choose_root_btn = QPushButton("选择目录")
+        root_row.addWidget(self.root_edit)
+        root_row.addWidget(self.choose_root_btn)
+        layout.addLayout(root_row)
+
         btn_row = QHBoxLayout()
         self.refresh_btn = QPushButton("刷新状态")
-        self.open_sample_btn = QPushButton("打开样例数据目录")
+        self.validate_btn = QPushButton("校验数据目录")
+        self.open_sample_btn = QPushButton("打开当前数据目录")
         self.open_doc_btn = QPushButton("打开整改说明")
         btn_row.addWidget(self.refresh_btn)
+        btn_row.addWidget(self.validate_btn)
         btn_row.addWidget(self.open_sample_btn)
         btn_row.addWidget(self.open_doc_btn)
         btn_row.addStretch()
@@ -66,12 +81,28 @@ class IntegrationOverviewWidget(QWidget):
         layout.addWidget(self.status_label)
         layout.addWidget(self.summary)
 
+        self.choose_root_btn.clicked.connect(self.choose_root)
         self.refresh_btn.clicked.connect(self.refresh_status)
-        self.open_sample_btn.clicked.connect(lambda: self._open_path(DEFAULT_TWIN_DATA_ROOT))
+        self.validate_btn.clicked.connect(self.validate_current_root)
+        self.open_sample_btn.clicked.connect(lambda: self._open_path(self.current_root()))
         self.open_doc_btn.clicked.connect(lambda: self._open_path(STANDARD_DOC))
 
+    def current_root(self) -> Path:
+        text = self.root_edit.text().strip()
+        return Path(text).expanduser().resolve() if text else DEFAULT_TWIN_DATA_ROOT
+
+    def choose_root(self):
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "选择瓦赫什流域孪生数据根目录",
+            str(self.current_root()),
+        )
+        if selected:
+            self.root_edit.setText(selected)
+            self.refresh_status()
+
     def refresh_status(self):
-        root = DEFAULT_TWIN_DATA_ROOT
+        root = self.current_root()
         required_dirs = [root / "baseline", root / "raw", root / "processed"]
         missing = [str(path) for path in required_dirs if not path.exists()]
         if missing:
@@ -87,6 +118,7 @@ class IntegrationOverviewWidget(QWidget):
             f"- 时间字段: {DATE_FIELD} ({DATE_FORMAT})",
             "",
             "二、标准数据目录",
+            f"- 根目录: {root}",
             f"- baseline: {root / 'baseline'}",
             f"- raw: {root / 'raw'}",
             f"- processed: {root / 'processed'}",
@@ -105,6 +137,34 @@ class IntegrationOverviewWidget(QWidget):
             lines.extend(["", "缺失目录:"])
             lines.extend(f"- {item}" for item in missing)
 
+        self.summary.setPlainText("\n".join(lines))
+
+    def validate_current_root(self):
+        root = self.current_root()
+        report = validate(root)
+        lines = [
+            f"校验目录: {root}",
+            f"检查通过项: {len(report.checked)}",
+            f"警告: {len(report.warnings)}",
+            f"错误: {len(report.errors)}",
+            "",
+        ]
+        if report.errors:
+            lines.append("错误列表:")
+            lines.extend(f"- {item}" for item in report.errors[:80])
+            if len(report.errors) > 80:
+                lines.append(f"- 其余 {len(report.errors) - 80} 项略")
+        elif report.warnings:
+            lines.append("警告列表:")
+            lines.extend(f"- {item}" for item in report.warnings[:80])
+            if len(report.warnings) > 80:
+                lines.append(f"- 其余 {len(report.warnings) - 80} 项略")
+        else:
+            lines.append("数据目录通过统一规范校验。")
+
+        self.status_label.setText(
+            "状态: 校验通过" if report.success else "状态: 校验存在错误"
+        )
         self.summary.setPlainText("\n".join(lines))
 
     def _open_path(self, path: Path):

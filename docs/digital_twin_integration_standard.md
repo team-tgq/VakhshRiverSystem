@@ -172,6 +172,26 @@ python tools/validate_twin_data.py
 python tools/validate_twin_data.py "D:/path/to/瓦赫什流域孪生数据"
 ```
 
+主程序也提供了界面校验入口：
+
+1. 打开 `数据整理与流程总览` 标签页。
+2. 在“数据根目录”中选择正式数据目录。
+3. 点击“校验数据目录”。
+4. 若出现错误，先修正目录结构、CRS、CSV 字段或 `finish.tag`，再进入业务模块。
+
+正式数据根目录可在 `config.py` 中设置：
+
+```python
+TWIN_DATA_ROOT = "D:/path/to/瓦赫什流域孪生数据"
+```
+
+也可在启动前通过环境变量覆盖：
+
+```powershell
+$env:VAKHSH_TWIN_DATA_ROOT = "D:/path/to/瓦赫什流域孪生数据"
+python main.py
+```
+
 当前校验内容包括：
 
 - `baseline/raw/processed` 三类目录是否存在。
