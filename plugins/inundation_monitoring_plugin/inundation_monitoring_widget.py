@@ -31,6 +31,7 @@ from app.digital_twin_standard import (
     mark_module_complete,
     module_output_path,
     period_to_date,
+    standard_dialog_dir,
     write_metadata_sidecar,
 )
 from app.ui_hints import attach_hint, create_hint_badge, label_with_hint
@@ -178,7 +179,7 @@ class InundationMonitoringWidget(QWidget):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "选择遥感影像",
-            "",
+            standard_dialog_dir("raw", module_code="M04"),
             "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;All Files (*)",
         )
         if file_path:

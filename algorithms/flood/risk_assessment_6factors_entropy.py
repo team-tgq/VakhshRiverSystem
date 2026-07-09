@@ -339,7 +339,7 @@ def compose_weighted_risk(factors, weights):
     return risk, valid_mask
 
 
-def save_weights_report(subjective_weights, entropy_weights, final_weights, sample_count, out_path):
+def save_weights_report(subjective_weights, entropy_weights, final_weights, sample_count, out_path, alpha_subjective=None):
     lines = []
     lines.append("Flood Risk Weights Report\n")
     lines.append("=" * 60 + "\n")
@@ -348,8 +348,9 @@ def save_weights_report(subjective_weights, entropy_weights, final_weights, samp
     else:
         lines.append("Weighting mode: subjective + entropy combination\n")
         lines.append(f"Entropy sample count: {sample_count}\n")
-        lines.append(f"Combination alpha (subjective): {CFG['alpha_subjective']:.3f}\n")
-        lines.append(f"Combination beta (entropy): {1.0 - CFG['alpha_subjective']:.3f}\n")
+        alpha = CFG["alpha_subjective"] if alpha_subjective is None else float(alpha_subjective)
+        lines.append(f"Combination alpha (subjective): {alpha:.3f}\n")
+        lines.append(f"Combination beta (entropy): {1.0 - alpha:.3f}\n")
     lines.append("=" * 60 + "\n\n")
 
     lines.append("[Factor Meaning]\n")
@@ -838,9 +839,15 @@ def run_risk_assessment(
     auto_prepare_static=True,
     allow_legacy_dynamic=True,
     auto_prepare_dynamic=True,
+    cfg=None,
 ):
+    run_cfg = CFG.copy()
+    if cfg:
+        run_cfg.update(cfg)
+    os.makedirs(run_cfg["out_dir"], exist_ok=True)
+
     input_paths = resolve_flood_input_paths(
-        CFG,
+        run_cfg,
         target_date=target_date,
         auto_prepare_static=auto_prepare_static,
         allow_legacy_dynamic=allow_legacy_dynamic,
@@ -862,7 +869,7 @@ def run_risk_assessment(
         np.clip(dem, np.nanpercentile(dem, 5), np.nanpercentile(dem, 95))
     )
     slope = slope_from_dem(dem, transform)
-    slope_low = 1.0 - minmax_norm(np.clip(slope, 0, CFG["slope_clip_max_deg"]))
+    slope_low = 1.0 - minmax_norm(np.clip(slope, 0, run_cfg["slope_clip_max_deg"]))
 
     rain_norm = minmax_norm(rain)
     soil_norm = minmax_norm(soil)
@@ -871,7 +878,7 @@ def run_risk_assessment(
     rivers = gpd.read_file(rivers_path).to_crs(crs)
     river_mask = rasterize_rivers_to_mask(rivers, dem.shape, transform)
     distance = distance_to_river_m(river_mask, transform)
-    river_near = minmax_norm(np.exp(-distance / CFG["river_decay_distance_m"]))
+    river_near = minmax_norm(np.exp(-distance / run_cfg["river_decay_distance_m"]))
 
     factors = {
         "rain": rain_norm,
@@ -884,12 +891,12 @@ def run_risk_assessment(
 
     entropy_weights, valid_mask, sample_count = entropy_weight_sampled(
         factors=factors,
-        sample_size=CFG["entropy_sample_size"],
-        random_seed=CFG["random_seed"],
+        sample_size=run_cfg["entropy_sample_size"],
+        random_seed=run_cfg["random_seed"],
     )
 
-    subjective_weights = CFG["subjective_weights"]
-    final_weights = combine_weights(subjective_weights, entropy_weights, CFG["alpha_subjective"])
+    subjective_weights = run_cfg["subjective_weights"]
+    final_weights = combine_weights(subjective_weights, entropy_weights, run_cfg["alpha_subjective"])
 
     print("\n[Final Weights]")
     for key, value in final_weights.items():
@@ -900,19 +907,20 @@ def run_risk_assessment(
         entropy_weights=entropy_weights,
         final_weights=final_weights,
         sample_count=sample_count,
-        out_path=CFG["out_weights_txt"],
+        out_path=run_cfg["out_weights_txt"],
+        alpha_subjective=run_cfg["alpha_subjective"],
     )
-    print("[Saved]", CFG["out_weights_txt"])
+    print("[Saved]", run_cfg["out_weights_txt"])
 
     risk, _ = compose_weighted_risk(factors, final_weights)
     risk[~valid_mask] = np.nan
     risk[np.isnan(dem)] = np.nan
     level_breaks = risk_level_breaks(risk)
 
-    write_raster(CFG["out_risk_tif"], risk, profile)
-    print("[Saved]", CFG["out_risk_tif"])
-    write_risk_level_raster(CFG["out_risk_level_tif"], risk, profile, level_breaks)
-    print("[Saved]", CFG["out_risk_level_tif"])
+    write_raster(run_cfg["out_risk_tif"], risk, profile)
+    print("[Saved]", run_cfg["out_risk_tif"])
+    write_risk_level_raster(run_cfg["out_risk_level_tif"], risk, profile, level_breaks)
+    print("[Saved]", run_cfg["out_risk_level_tif"])
 
     explainability = save_landuse_explainability_outputs(
         risk=risk,
@@ -920,28 +928,28 @@ def run_risk_assessment(
         transform=transform,
         crs=crs,
         final_weights=final_weights,
-        stats_csv_path=CFG["out_landuse_stats_csv"],
-        summary_path=CFG["out_landuse_summary_txt"],
+        stats_csv_path=run_cfg["out_landuse_stats_csv"],
+        summary_path=run_cfg["out_landuse_summary_txt"],
     )
-    print("[Saved]", CFG["out_landuse_stats_csv"])
-    print("[Saved]", CFG["out_landuse_summary_txt"])
+    print("[Saved]", run_cfg["out_landuse_stats_csv"])
+    print("[Saved]", run_cfg["out_landuse_summary_txt"])
 
     build_folium_map(
         risk=risk,
         landcover=landcover,
         dem_path=dem_path,
         study_area_shp=input_paths["study_area_shp"],
-        out_map=CFG["out_map"],
+        out_map=run_cfg["out_map"],
     )
-    print("[Saved]", CFG["out_map"])
+    print("[Saved]", run_cfg["out_map"])
 
     return {
-        "risk_tif": CFG["out_risk_tif"],
-        "risk_level_tif": CFG["out_risk_level_tif"],
-        "map_html": CFG["out_map"],
-        "weights_txt": CFG["out_weights_txt"],
-        "landuse_stats_csv": CFG["out_landuse_stats_csv"],
-        "landuse_summary_txt": CFG["out_landuse_summary_txt"],
+        "risk_tif": run_cfg["out_risk_tif"],
+        "risk_level_tif": run_cfg["out_risk_level_tif"],
+        "map_html": run_cfg["out_map"],
+        "weights_txt": run_cfg["out_weights_txt"],
+        "landuse_stats_csv": run_cfg["out_landuse_stats_csv"],
+        "landuse_summary_txt": run_cfg["out_landuse_summary_txt"],
         "landuse_factor_name": "landuse_suscept",
         "subjective_weights": subjective_weights,
         "entropy_weights": entropy_weights,

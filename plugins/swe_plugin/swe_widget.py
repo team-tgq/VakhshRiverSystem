@@ -35,9 +35,12 @@ from PyQt5.QtWidgets import (
 from app.digital_twin_standard import (
     DEFAULT_PERIOD,
     TARGET_CRS,
+    baseline_dir,
     default_run_context,
     mark_module_complete,
     module_output_path,
+    period_to_date,
+    processed_dir,
     write_metadata_sidecar,
 )
 from algorithms.swe import swe_assessment
@@ -589,18 +592,47 @@ class SWEWidget(QWidget):
 
     def load_existing_results(self, silent: bool = False) -> None:
         try:
-            self.result = swe_assessment.load_existing_results()
-            if not silent:
-                exported = self._export_standard_results(self.result)
-                if exported:
-                    self._log(f"已同步 {exported} 个业务日的 M02 标准成果。")
+            self.result = self._load_standard_results_from_processed()
+            if not self.result.get("entries"):
+                if silent:
+                    return
+                raise FileNotFoundError("标准 processed 目录中没有 M02 SWE 成果，请先运行 SWE 模块生成标准输出。")
             self.populate_results()
             if not silent:
-                self._log("已加载已有 SWE 结果。")
+                self._log("已从统一 processed 目录加载已有 SWE 结果。")
         except Exception as exc:
             if not silent:
                 self._log(f"[ERROR] {exc}")
                 QMessageBox.critical(self, "加载失败", str(exc))
+
+    def _load_standard_results_from_processed(self) -> dict:
+        entries = []
+        root = processed_dir()
+        for swe_path in sorted(root.glob("*/*/raster/*_M02_swe_mm.tif")):
+            period = swe_path.name.split("_", 1)[0]
+            runoff_path = swe_path.with_name(f"{period}_M02_runoff_mm.tif")
+            if not runoff_path.exists():
+                continue
+            entries.append(
+                {
+                    "business_date": period_to_date(period),
+                    "source_status": "standard_processed",
+                    "forcing_cycle": "",
+                    "viirs_status": "",
+                    "swe_mm": float("nan"),
+                    "snowmelt_mm_day": float("nan"),
+                    "swe_raster": str(swe_path),
+                    "snowmelt_raster": str(runoff_path),
+                    "standard_swe_raster": str(swe_path),
+                    "standard_runoff_raster": str(runoff_path),
+                    "diagnostics": {},
+                }
+            )
+        return {
+            "entries": entries,
+            "latest_entry": entries[-1] if entries else {},
+            "study_area_shp": str(baseline_dir() / "流域边界.shp"),
+        }
 
     def _export_standard_results(self, result: dict | None) -> int:
         if not result:

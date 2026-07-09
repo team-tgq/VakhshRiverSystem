@@ -194,13 +194,13 @@ mark_module_complete(context, "M05")
 
 当前已完成标准成果自动导出的插件：
 
-- `M01 SegFormer专题识别`：积雪覆盖 GeoTIFF 可同步写入 `raster/{period}_M01_snow_cover.tif`、`raster/{period}_M01_snow_depth_m.tif` 与 `table/{period}_M01_积雪面积统计表.csv`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。普通 png/jpg 推理结果因缺少 CRS，只保留界面预览结果，不进入正式 GIS 成果链路；雪深当前标记为 `proxy_from_snow_cover`，等待真实雪深来源接入。
+- `M01 SegFormer专题识别`：积雪覆盖 GeoTIFF 可同步写入 `raster/{period}_M01_snow_cover.tif` 与 `table/{period}_M01_积雪面积统计表.csv`，必要时重投影到 `EPSG:32642`，并写入旁路元数据。普通 png/jpg 推理结果因缺少 CRS，只保留界面预览结果，不进入正式 GIS 成果链路；雪深必须由真实雪深模型或带 CRS 的雪深产品生成，不能由积雪覆盖默认值伪造。
 - `M06 积雪状态识别`：GEE 双波段 GeoTIFF 下载到本地后，可在插件中同步写入 `raster/{period}_M06_snow_type.tif` 与 `raster/{period}_M06_snow_density_gcm3.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。当前雪密度由 `Snow_State` 类别映射生成，真实雪密度模型确认后可替换。
 - `M02 雪水当量估算`：更新最新 SWE 或加载已有结果后，自动写入 `raster/{period}_M02_swe_mm.tif` 与 `raster/{period}_M02_runoff_mm.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
 - `M03 洪水演进与汇流模拟`：可将外部汇流模型生成的流量 CSV、水深 GeoTIFF 和模拟淹没 GeoTIFF 同步写入 `table/{period}_M03_discharge.csv`、`raster/{period}_M03_flood_depth_m.tif`、`raster/{period}_M03_inundation.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
 - `M04 SAR/遥感淹没区监测`：输入 GeoTIFF 时自动写入 `raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并写入旁路元数据与 `finish.tag`。普通 png/jpg 因缺少 CRS，只保留界面预览结果，不进入正式 GIS 成果链路。
 - `M05 RAFT 光流测速`：自动写入 `table/{period}_实测_流速数据.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`method`、`velocity_m_s`、`mean_flow_direction_deg`、`fps`、`frame_count`、`valid_pairs`。
-- `M09 库区水量估算`：自动写入 `table/{period}_M09_storage.csv` 与 `table/{period}_M09_outflow.csv`，其中 storage 记录水位/面积/库容，outflow 当前保留标准接口并标记 `data_status=not_available`，等待真实下泄流量来源接入。
+- `M09 库区水量估算`：自动写入 `table/{period}_M09_storage.csv`，其中 storage 记录水位/面积/库容。`table/{period}_M09_outflow.csv` 必须等真实下泄流量观测或调度模型接入后再生成，不写缺测占位表。
 - `M07 洪涝风险评估`：自动写入 `raster/{period}_M07_洪涝风险分区图.tif`，优先采用五级风险等级栅格，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
 - `M08 水资源分配`：自动写入 `table/{period}_M08_分水方案统计表.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`time_scale`、`sector`、`demand_million_m3`、`surface_release_million_m3`、`groundwater_million_m3`、`received_million_m3`、`shortage_million_m3`、`satisfaction_ratio_pct`。
 
@@ -212,12 +212,11 @@ mark_module_complete(context, "M05")
 python tools/prepare_real_twin_data.py --resolution-m 1000
 python tools/prepare_real_twin_data.py --local-raw-root "D:/path/to/已有真实raw" --fallback-year 2017
 python tools/validate_twin_data.py --stage baseline-raw
-python tools/run_real_twin_pipeline.py
 python tools/validate_twin_data.py --stage full
 python tools/validate_twin_data.py "D:/path/to/瓦赫什流域孪生数据"
 ```
 
-`prepare_real_twin_data.py` 会优先使用本地真实 `raw`，本地缺失时再下载研究期内可追溯公开数据。`run_real_twin_pipeline.py` 会统一扫描 `raw/{YYYYMM_时段}`，为常规调度和优化分水两个工况生成 M01、M06、M02、M03、M09、M08、M04、M07、M05 标准成果、旁路元数据和 `finish.tag`；若缺少真实河道视频，M05 只写入 `data_status=not_available` 的流速表，不伪造流速。`baseline-raw` 阶段只校验基础数据和原始观测数据；`full` 阶段要求各模块已经写入真实 `processed` 成果、旁路元数据和 `finish.tag`。
+`prepare_real_twin_data.py` 会优先使用本地真实 `raw`，本地缺失时再下载研究期内可追溯公开数据。`processed` 只能由各模块真实运行后写入；若缺少真实输入或模块尚未运行，应保持成果缺失并由 `full` 校验报出，不允许用批处理脚本伪造 M01-M09 成果。`baseline-raw` 阶段只校验基础数据和原始观测数据；`full` 阶段要求各模块已经写入真实 `processed` 成果、旁路元数据和 `finish.tag`。
 
 主程序也提供了界面校验入口：
 
@@ -254,8 +253,8 @@ python main.py
 
 ## 9. 待刘老师或模块负责人确认事项
 
-- M01 已支持把带 CRS 的积雪覆盖 GeoTIFF 同步为标准积雪覆盖、雪深代理和面积统计成果；是否需要同时把水体识别成果标准化输出给 M03 或 M07，仍需模块负责人确认。
+- M01 已支持把带 CRS 的积雪覆盖 GeoTIFF 同步为标准积雪覆盖和面积统计成果；雪深不再自动代理生成，必须等待真实雪深来源接入。是否需要同时把水体识别成果标准化输出给 M03 或 M07，仍需模块负责人确认。
 - M06 积雪状态识别已将 GEE 输出转换为 `snow_type` 和 `snow_density` 两个标准文件；其中雪密度当前为类别映射值，仍需确认是否替换为实测或独立模型雪密度。
 - M03 已支持把外部汇流模型成果同步到 `processed/` 标准目录；Unity 三维展示是否只读该目录，还是需要额外三维场景缓存目录，仍需和模块负责人确认。
-- M09 库区水量估算已生成 `M09_outflow.csv` 标准接口文件，但真实下泄流量仍缺少可追溯来源；需要确认出库流量来源、单位和时间步长后替换当前缺测占位。
+- M09 库区水量估算当前只生成 `M09_storage.csv`；真实下泄流量仍缺少可追溯来源，需要确认出库流量来源、单位和时间步长后再生成 `M09_outflow.csv`。
 - M04/M05 是否只做人工校核，还是要在界面中自动参与参数率定。

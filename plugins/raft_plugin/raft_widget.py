@@ -27,6 +27,7 @@ from app.digital_twin_standard import (
     mark_module_complete,
     module_output_path,
     period_to_date,
+    standard_dialog_dir,
     write_metadata_sidecar,
     write_standard_csv,
 )
@@ -301,7 +302,7 @@ class RaftWidget(QWidget):
     # ------------------------------------------------------------------
     def _select_video(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "选择视频文件", "",
+            self, "选择视频文件", standard_dialog_dir("raw", module_code="M05"),
             "Video Files (*.mp4 *.avi *.mov)")
         if path:
             self.video_path = path

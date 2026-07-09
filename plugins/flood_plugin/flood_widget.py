@@ -37,10 +37,13 @@ from PyQt5.QtWidgets import (
 from algorithms.flood import risk_assessment_6factors_entropy
 from app.digital_twin_standard import (
     TARGET_CRS,
+    baseline_dir,
     default_run_context,
     mark_module_complete,
     module_output_path,
     period_to_date,
+    processed_dir,
+    raw_dir,
     write_metadata_sidecar,
 )
 from app.ui_hints import attach_hint, label_with_hint
@@ -63,6 +66,8 @@ def _target_date_to_context(target_date: str | None):
 def _copy_or_reproject_raster(src_path: str | Path, dst_path: str | Path) -> Path:
     src_path = Path(src_path)
     dst_path = Path(dst_path)
+    if src_path.resolve() == dst_path.resolve():
+        return dst_path
     dst_path.parent.mkdir(parents=True, exist_ok=True)
 
     with rasterio.open(src_path) as src:
@@ -535,11 +540,13 @@ class FloodWidget(QWidget):
 
     def run_analysis(self):
         target_date = self.date_input.date().toString("yyyy-MM-dd")
+        context = _target_date_to_context(target_date)
         try:
             self.log.append(f"开始运行洪涝风险评估，目标日期：{target_date}")
             result = risk_assessment_6factors_entropy.run_risk_assessment(
                 target_date=target_date,
                 allow_legacy_dynamic=False,
+                cfg=self._risk_assessment_cfg(context),
             )
             self.result_paths = result
 
@@ -604,38 +611,42 @@ class FloodWidget(QWidget):
                 self.log.append("已加载标准成果目录中的洪涝风险分区图。")
                 return
 
-            base_dir = os.path.dirname(risk_assessment_6factors_entropy.__file__)
-            risk_tif = os.path.join(base_dir, "outputs", "risk_6factors.tif")
-            risk_level_tif = os.path.join(base_dir, "outputs", "risk_6factors_level.tif")
-            map_html = os.path.join(base_dir, "outputs", "flood_risk_map.html")
-            study_area_shp = os.path.join(base_dir, "study_area.shp")
-            landcover_path = os.path.join(base_dir, "data", "processed", "landcover_demgrid.tif")
-            landuse_stats_csv = os.path.join(base_dir, "outputs", "landuse_risk_stats.csv")
-            landuse_summary_txt = os.path.join(base_dir, "outputs", "landuse_risk_summary.txt")
-
-            if not os.path.exists(risk_tif):
-                raise FileNotFoundError(f"Result raster not found: {risk_tif}")
-            if not os.path.exists(map_html):
-                raise FileNotFoundError(f"Result map not found: {map_html}")
-
-            self.result_paths = {
-                "risk_tif": risk_tif,
-                "risk_level_tif": risk_level_tif,
-                "map_html": map_html,
-                "study_area_shp": study_area_shp,
-                "landcover_path": landcover_path,
-                "landuse_stats_csv": landuse_stats_csv,
-                "landuse_summary_txt": landuse_summary_txt,
-            }
-
-            self.display_results()
-            self.log.append("已加载已有结果。")
+            raise FileNotFoundError("标准 processed 目录中没有当前日期的 M07 洪涝风险成果。")
         except Exception as exc:
             user_message, detail = self._format_user_error(exc, loading_existing=True)
             self.log.append(user_message.replace("\n\n", " "))
             if detail and detail != user_message:
                 self.log.append(f"详细原因：{detail}")
             self._show_user_error("无法加载结果", user_message)
+
+    def _risk_assessment_cfg(self, context):
+        root = context.root_path
+        period_dir = context.period_dir
+        raster_dir = period_dir / "raster"
+        table_dir = period_dir / "table"
+        raster_dir.mkdir(parents=True, exist_ok=True)
+        table_dir.mkdir(parents=True, exist_ok=True)
+
+        cache_root = processed_dir(root) / "_cache" / "M07_洪涝风险评估"
+        raw_cache = raw_dir(root) / "_cache" / "M07_洪涝风险评估"
+        cache_root.mkdir(parents=True, exist_ok=True)
+        raw_cache.mkdir(parents=True, exist_ok=True)
+
+        return {
+            **risk_assessment_6factors_entropy.CFG,
+            "study_area_shp": str(baseline_dir(root) / "流域边界.shp"),
+            "dem_path": str(baseline_dir(root) / "DEM.tif"),
+            "rivers_path": str(baseline_dir(root) / "河网.shp"),
+            "proc_dir": str(cache_root),
+            "raw_dir": str(raw_cache),
+            "out_dir": str(table_dir),
+            "out_risk_tif": str(raster_dir / f"{context.period}_M07_risk_score.tif"),
+            "out_risk_level_tif": str(module_output_path("M07", context=context)),
+            "out_map": str(table_dir / f"{context.period}_M07_flood_risk_map.html"),
+            "out_weights_txt": str(table_dir / f"{context.period}_M07_final_weights.txt"),
+            "out_landuse_stats_csv": str(table_dir / f"{context.period}_M07_landuse_risk_stats.csv"),
+            "out_landuse_summary_txt": str(table_dir / f"{context.period}_M07_landuse_risk_summary.txt"),
+        }
 
     def _export_standard_result(self, result):
         target_date = result.get("resolved_target_date") or result.get("requested_target_date")
@@ -679,21 +690,21 @@ class FloodWidget(QWidget):
         if not standard_tif.exists():
             return None
 
-        base_dir = os.path.dirname(risk_assessment_6factors_entropy.__file__)
-        map_html = os.path.join(base_dir, "outputs", "flood_risk_map.html")
-        study_area_shp = os.path.join(base_dir, "study_area.shp")
-        landcover_path = os.path.join(base_dir, "data", "processed", "landcover_demgrid.tif")
-        landuse_stats_csv = os.path.join(base_dir, "outputs", "landuse_risk_stats.csv")
-        landuse_summary_txt = os.path.join(base_dir, "outputs", "landuse_risk_summary.txt")
+        table_dir = context.period_dir / "table"
+        cache_root = processed_dir(context.root_path) / "_cache" / "M07_洪涝风险评估"
+        map_html = table_dir / f"{context.period}_M07_flood_risk_map.html"
+        landcover_path = cache_root / "landcover_demgrid.tif"
+        landuse_stats_csv = table_dir / f"{context.period}_M07_landuse_risk_stats.csv"
+        landuse_summary_txt = table_dir / f"{context.period}_M07_landuse_risk_summary.txt"
 
         return {
             "risk_tif": str(standard_tif),
             "risk_level_tif": str(standard_tif),
-            "map_html": map_html,
-            "study_area_shp": study_area_shp,
-            "landcover_path": landcover_path,
-            "landuse_stats_csv": landuse_stats_csv,
-            "landuse_summary_txt": landuse_summary_txt,
+            "map_html": str(map_html),
+            "study_area_shp": str(baseline_dir(context.root_path) / "流域边界.shp"),
+            "landcover_path": str(landcover_path),
+            "landuse_stats_csv": str(landuse_stats_csv),
+            "landuse_summary_txt": str(landuse_summary_txt),
         }
 
     def display_results(self):

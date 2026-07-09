@@ -134,6 +134,7 @@ def _static_candidates(cfg: dict) -> dict[str, list[str]]:
         ),
         "dem_path": _dedupe_paths(
             [
+                cfg.get("dem_path"),
                 os.path.join(proc_dir, "dem_clip.tif"),
                 os.path.join(data_dir, "processed", "dem_clip.tif"),
                 os.path.join(BASE_DIR, "dem_clip.tif"),
@@ -141,6 +142,7 @@ def _static_candidates(cfg: dict) -> dict[str, list[str]]:
         ),
         "landcover_path": _dedupe_paths(
             [
+                cfg.get("landcover_path"),
                 os.path.join(proc_dir, "landcover_demgrid.tif"),
                 os.path.join(data_dir, "processed", "landcover_demgrid.tif"),
                 os.path.join(BASE_DIR, "landcover_demgrid.tif"),
@@ -148,6 +150,7 @@ def _static_candidates(cfg: dict) -> dict[str, list[str]]:
         ),
         "rivers_path": _dedupe_paths(
             [
+                cfg.get("rivers_path"),
                 os.path.join(raw_dir, "hydrorivers.gpkg"),
                 os.path.join(data_dir, "raw", "hydrorivers.gpkg"),
                 os.path.join(BASE_DIR, "hydrorivers.gpkg"),
@@ -161,6 +164,7 @@ def _dem_source_candidates(cfg: dict) -> list[str]:
     data_dir = os.path.join(BASE_DIR, "data")
     return _dedupe_paths(
         [
+            cfg.get("dem_path"),
             cfg.get("dem_tif"),
             os.path.join(BASE_DIR, "dem.tif"),
             os.path.join(raw_dir, "dem.tif"),

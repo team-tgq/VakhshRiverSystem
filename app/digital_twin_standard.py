@@ -58,6 +58,7 @@ RAW_TO_PROCESSED_PERIOD_NAMES = {
     "融雪期": "融雪模拟",
     "汛期": "汛期模拟",
 }
+PROCESSED_TO_RAW_PERIOD_NAMES = {value: key for key, value in RAW_TO_PROCESSED_PERIOD_NAMES.items()}
 
 
 STANDARD_FIELDS = {
@@ -252,8 +253,32 @@ def baseline_dir(root: str | Path | None = None) -> Path:
     return twin_root(root) / "baseline"
 
 
+def raw_dir(root: str | Path | None = None) -> Path:
+    return twin_root(root) / "raw"
+
+
+def processed_dir(root: str | Path | None = None) -> Path:
+    return twin_root(root) / "processed"
+
+
+def raw_period_name_from_processed(period_name: str) -> str:
+    return PROCESSED_TO_RAW_PERIOD_NAMES.get(period_name, period_name)
+
+
 def raw_period_dir(period: str, period_name: str, root: str | Path | None = None) -> Path:
     return twin_root(root) / "raw" / f"{period}_{period_name}"
+
+
+def raw_period_dir_for_context(context: TwinRunContext) -> Path:
+    raw_name = raw_period_name_from_processed(context.period_name)
+    exact = raw_period_dir(context.period, raw_name, root=context.root)
+    if exact.exists():
+        return exact
+
+    matches = sorted(raw_dir(context.root).glob(f"{context.period}_*"))
+    if matches:
+        return matches[0]
+    return exact
 
 
 def processed_period_dir(
@@ -387,6 +412,114 @@ def module_output_paths(module_code: str, *, context: TwinRunContext | None = No
     ]
 
 
+def _format_standard_pattern(pattern: str, context: TwinRunContext) -> Path:
+    root = twin_root(context.root)
+    formatted = pattern.format(
+        scheme=context.scheme_folder,
+        period=context.period,
+    )
+    if formatted.startswith("baseline/"):
+        return root / formatted
+    if formatted.startswith("raw/{period}/"):
+        suffix = formatted.split("/", 2)[2]
+        return raw_period_dir_for_context(context) / suffix
+    if formatted.startswith("raw/"):
+        parts = formatted.split("/", 2)
+        if len(parts) >= 3 and parts[1] == context.period:
+            return raw_period_dir_for_context(context) / parts[2]
+        return root / formatted
+    if formatted.startswith("processed/{scheme}/{period}/"):
+        return context.period_dir / formatted.split("/", 3)[3]
+    if formatted.startswith("processed/"):
+        prefix = f"processed/{context.scheme_folder}/{context.period}/"
+        if formatted.startswith(prefix):
+            return context.period_dir / formatted[len(prefix):]
+        prefix = f"processed/{context.scheme_folder}/{context.period_folder}/"
+        if formatted.startswith(prefix):
+            return context.period_dir / formatted[len(prefix):]
+        return root / formatted
+    return context.period_dir / formatted
+
+
+def module_input_path(
+    module_code: str,
+    *,
+    context: TwinRunContext | None = None,
+    input_index: int = 0,
+    required: bool = False,
+) -> Path:
+    context = context or default_run_context()
+    spec = module_spec(module_code)
+    path = _format_standard_pattern(spec.inputs[input_index], context)
+    if required and not path.exists():
+        raise FileNotFoundError(
+            f"{spec.code} {spec.name} 缺少统一输入: {path}\n"
+            f"请先把真实数据放入 {twin_root(context.root)} 的 baseline/raw/processed 标准目录，"
+            "或先运行上游模块生成标准成果。"
+        )
+    return path
+
+
+def module_input_paths(
+    module_code: str,
+    *,
+    context: TwinRunContext | None = None,
+    required: bool = False,
+) -> list[Path]:
+    context = context or default_run_context()
+    return [
+        module_input_path(module_code, context=context, input_index=index, required=required)
+        for index, _ in enumerate(module_spec(module_code).inputs)
+    ]
+
+
+def latest_module_output(
+    module_code: str,
+    *,
+    output_index: int = 0,
+    root: str | Path | None = None,
+) -> Path | None:
+    spec = module_spec(module_code)
+    pattern = spec.outputs[output_index]
+    base = processed_dir(root)
+    candidates: list[Path] = []
+    if not base.exists():
+        return None
+    for period_dir in base.glob("*/*"):
+        if not period_dir.is_dir() or "_" not in period_dir.name:
+            continue
+        period = period_dir.name.split("_", 1)[0]
+        candidate = period_dir / pattern.format(period=period, scheme=period_dir.parent.name)
+        if candidate.exists():
+            candidates.append(candidate)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def standard_dialog_dir(
+    kind: str = "raw",
+    *,
+    module_code: str | None = None,
+    context: TwinRunContext | None = None,
+    output_index: int = 0,
+    root: str | Path | None = None,
+) -> str:
+    context = context or default_run_context(root=root)
+    if module_code:
+        try:
+            if kind == "output":
+                return str(module_output_path(module_code, context=context, output_index=output_index).parent)
+            return str(module_input_path(module_code, context=context).parent)
+        except Exception:
+            pass
+    if kind == "baseline":
+        return str(baseline_dir(context.root))
+    if kind == "processed":
+        return str(processed_dir(context.root))
+    return str(raw_dir(context.root))
+
+
 def write_standard_csv(
     output_path: str | Path,
     *,
@@ -513,6 +646,7 @@ __all__ = [
     "DEFAULT_SCHEME",
     "DEFAULT_SCHEME_NAME",
     "MODULE_SPECS",
+    "PROCESSED_TO_RAW_PERIOD_NAMES",
     "RAW_TO_PROCESSED_PERIOD_NAMES",
     "SAMPLE_TWIN_DATA_ROOT",
     "REAL_TWIN_DATA_ROOT",
@@ -531,15 +665,23 @@ __all__ = [
     "ensure_run_context",
     "infer_run_context_from_path",
     "iter_module_specs",
+    "latest_module_output",
     "mark_module_complete",
+    "module_input_path",
+    "module_input_paths",
     "module_output_path",
     "module_output_paths",
     "module_spec",
     "period_to_date",
+    "processed_dir",
     "processed_period_dir",
     "raster_dir",
+    "raw_dir",
+    "raw_period_dir_for_context",
+    "raw_period_name_from_processed",
     "raw_period_dir",
     "specs_as_dict",
+    "standard_dialog_dir",
     "table_dir",
     "twin_root",
     "write_finish_tag",

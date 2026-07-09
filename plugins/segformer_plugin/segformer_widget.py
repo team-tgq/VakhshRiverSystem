@@ -21,16 +21,13 @@ from app.digital_twin_standard import (
     DEFAULT_PERIOD,
     TARGET_CRS,
     default_run_context,
-    mark_module_complete,
     module_output_path,
     period_to_date,
+    standard_dialog_dir,
     write_metadata_sidecar,
     write_standard_csv,
 )
 from app.ui_hints import attach_hint, label_with_hint
-
-
-DEFAULT_SNOW_DEPTH_M = 0.10
 
 
 def _context_from_output_path(path: str | Path):
@@ -113,31 +110,6 @@ def _write_snow_cover_tif(snow_cover: np.ndarray, transform, width: int, height:
     }
     with rasterio.open(dst_path, "w", **profile) as dst:
         dst.write(snow_cover.astype(np.uint8), 1)
-    return dst_path
-
-
-def _write_snow_depth_proxy_tif(
-    snow_cover: np.ndarray,
-    transform,
-    width: int,
-    height: int,
-    dst_path: str | Path,
-) -> Path:
-    dst_path = Path(dst_path)
-    dst_path.parent.mkdir(parents=True, exist_ok=True)
-    snow_depth = np.where(snow_cover > 0, DEFAULT_SNOW_DEPTH_M, 0.0).astype(np.float32)
-    profile = {
-        "driver": "GTiff",
-        "height": height,
-        "width": width,
-        "count": 1,
-        "dtype": "float32",
-        "crs": TARGET_CRS,
-        "transform": transform,
-        "compress": "lzw",
-    }
-    with rasterio.open(dst_path, "w", **profile) as dst:
-        dst.write(snow_depth, 1)
     return dst_path
 
 
@@ -287,12 +259,13 @@ class SegFormerWidget(QWidget):
         self.update_defaults()
 
     def update_defaults(self):
-        task = TASKS[self.current_task]
-        if os.path.exists(task["input_dir"]):
+        input_dir = standard_dialog_dir("raw", module_code="M01")
+        if os.path.exists(input_dir):
             files = [
-                os.path.join(task["input_dir"], f)
-                for f in os.listdir(task["input_dir"])
-                if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp"))
+                os.path.join(root, f)
+                for root, _, names in os.walk(input_dir)
+                for f in names
+                if f.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"))
             ]
             if files:
                 self.image_path = files[0]
@@ -300,12 +273,11 @@ class SegFormerWidget(QWidget):
                 self.input_label.set_image(self.image_path)
 
     def select_image(self):
-        task = TASKS[self.current_task]
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "选择输入图片",
-            task["input_dir"],
-            "Images (*.png *.jpg *.jpeg *.bmp)"
+            standard_dialog_dir("raw", module_code="M01"),
+            "Images/GeoTIFF (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
         )
         if file_path:
             self.image_path = file_path
@@ -355,23 +327,25 @@ class SegFormerWidget(QWidget):
             QMessageBox.critical(self, "错误", str(e))
 
     def load_existing_result(self):
-        task = TASKS[self.current_task]
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "加载已有结果",
-            task["output_dir"],
-            "Images (*.png *.jpg *.jpeg *.bmp)"
+            standard_dialog_dir("output", module_code="M01", output_index=1),
+            "GeoTIFF (*.tif *.tiff);;Images (*.png *.jpg *.jpeg *.bmp)"
         )
         if file_path:
             self.result_path = file_path
-            self.result_label.set_image(file_path)
-            self.log.append(f"已加载结果: {file_path}")
+            if file_path.lower().endswith((".tif", ".tiff")):
+                self.result_label.setText("已加载标准 GeoTIFF\n用于统一 processed 链路")
+            else:
+                self.result_label.set_image(file_path)
+            self.log.append(f"已加载标准结果: {file_path}")
 
     def sync_standard_snow_outputs(self):
         geotiff_path, _ = QFileDialog.getOpenFileName(
             self,
             "选择 M01 积雪覆盖 GeoTIFF",
-            "",
+            standard_dialog_dir("raw", module_code="M01"),
             "GeoTIFF (*.tif *.tiff);;All files (*.*)",
         )
         if not geotiff_path:
@@ -381,9 +355,9 @@ class SegFormerWidget(QWidget):
             outputs = self._export_standard_snow_result(geotiff_path)
             self.log.append("M01 积雪标准成果已同步。")
             self.log.append(f"积雪覆盖: {outputs['snow_cover']}")
-            self.log.append(f"积雪深度: {outputs['snow_depth']}")
             self.log.append(f"面积统计: {outputs['area_table']}")
-            QMessageBox.information(self, "同步完成", "已写入 M01 标准成果目录。")
+            self.log.append("雪深未写入：当前 SegFormer 结果未提供真实雪深栅格。")
+            QMessageBox.information(self, "同步完成", "已写入 M01 积雪覆盖与面积统计；未伪造雪深。")
         except Exception as exc:
             self.log.append(f"[ERROR] {exc}")
             self.log.append(traceback.format_exc())
@@ -391,13 +365,11 @@ class SegFormerWidget(QWidget):
 
     def _export_standard_snow_result(self, geotiff_path: str | Path) -> dict[str, Path]:
         context = _context_from_output_path(geotiff_path)
-        snow_depth_tif = module_output_path("M01", context=context, output_index=0)
         snow_cover_tif = module_output_path("M01", context=context, output_index=1)
         area_table = module_output_path("M01", context=context, output_index=2)
 
         snow_cover, transform, width, height, source_crs, band_count = _read_snow_cover_as_target(geotiff_path)
         _write_snow_cover_tif(snow_cover, transform, width, height, snow_cover_tif)
-        _write_snow_depth_proxy_tif(snow_cover, transform, width, height, snow_depth_tif)
         _write_snow_area_table(snow_cover, transform, context, area_table)
 
         source_files = [geotiff_path]
@@ -423,19 +395,6 @@ class SegFormerWidget(QWidget):
             },
         )
         write_metadata_sidecar(
-            snow_depth_tif,
-            module_code="M01",
-            field="snow_depth",
-            source_files=source_files,
-            extra={
-                **common_extra,
-                "standard_field": "snow_depth",
-                "data_status": "proxy_from_snow_cover",
-                "default_snow_depth_m": DEFAULT_SNOW_DEPTH_M,
-                "proxy_note": "M01 当前仅接入积雪覆盖识别结果；雪深以积雪区默认代理值写入，用于保持 M01->M06/M02 标准接口完整，不能替代实测或模型雪深。",
-            },
-        )
-        write_metadata_sidecar(
             area_table,
             module_code="M01",
             field="snow_cover",
@@ -446,9 +405,7 @@ class SegFormerWidget(QWidget):
                 "output_type": "area_statistics_table",
             },
         )
-        mark_module_complete(context, "M01")
         return {
             "snow_cover": snow_cover_tif,
-            "snow_depth": snow_depth_tif,
             "area_table": area_table,
         }

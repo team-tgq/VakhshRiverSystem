@@ -41,6 +41,7 @@ from app.digital_twin_standard import (
     default_run_context,
     mark_module_complete,
     module_output_path,
+    standard_dialog_dir,
     write_metadata_sidecar,
 )
 from app.ui_hints import attach_hint, label_with_hint
@@ -392,7 +393,7 @@ class SnowStateWidget(QWidget):
         path, _ = QFileDialog.getOpenFileName(
             self,
             "选择已下载的 GEE GeoTIFF",
-            "",
+            standard_dialog_dir("processed", module_code="M06"),
             "GeoTIFF (*.tif *.tiff);;All files (*.*)",
         )
         if not path:

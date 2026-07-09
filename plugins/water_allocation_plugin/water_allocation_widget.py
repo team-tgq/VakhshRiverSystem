@@ -30,6 +30,7 @@ from app.digital_twin_standard import (
     mark_module_complete,
     module_output_path,
     period_to_date,
+    standard_dialog_dir,
     write_metadata_sidecar,
     write_standard_csv,
 )
@@ -941,7 +942,7 @@ class WaterAllocationWidget(QWidget):
         train_row.addWidget(self.train_data_path_edit)
         train_browse = QPushButton("浏览")
         train_browse.clicked.connect(lambda: self.train_data_path_edit.setText(
-            QFileDialog.getOpenFileName(self, "选择训练数据", "", "CSV/Excel (*.csv *.xlsx *.xls);;NetCDF (*.nc)")[0]
+            QFileDialog.getOpenFileName(self, "选择训练数据", standard_dialog_dir("raw"), "CSV/Excel (*.csv *.xlsx *.xls);;NetCDF (*.nc)")[0]
             or self.train_data_path_edit.text()))
         train_row.addWidget(train_browse)
         train_layout.addLayout(train_row)
@@ -992,7 +993,7 @@ class WaterAllocationWidget(QWidget):
             QMessageBox.warning(self, "缺少依赖",
                 f"遥感模块不可用: {_RS_IMPORT_ERROR}\n")
             return
-        filepaths = QFileDialog.getOpenFileNames(self, "选择影像", "", "GeoTIFF (*.tif *.tiff)")[0]
+        filepaths = QFileDialog.getOpenFileNames(self, "选择影像", standard_dialog_dir("raw"), "GeoTIFF (*.tif *.tiff)")[0]
         if not filepaths:
             return
         weights_path = str(_RESOURCE_DIR / "models" / "3_Class_FULL_FTW_Pretrained_v2.ckpt")
@@ -1401,12 +1402,12 @@ class WaterAllocationWidget(QWidget):
 
     # ======================= 水文数据 Tab =======================
     def _select_nc_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择数据", "", "Data (*.nc *.csv *.xlsx *.xls)")
+        path, _ = QFileDialog.getOpenFileName(self, "选择数据", standard_dialog_dir("raw"), "Data (*.nc *.csv *.xlsx *.xls)")
         if path:
             self.nc_data_path_edit.setText(path)
 
     def _select_nc_dir(self):
-        path = QFileDialog.getExistingDirectory(self, "选择目录")
+        path = QFileDialog.getExistingDirectory(self, "选择目录", standard_dialog_dir("raw"))
         if path:
             self.nc_data_path_edit.setText(path)
 

@@ -24,6 +24,7 @@ from app.digital_twin_standard import (
     mark_module_complete,
     module_output_path,
     period_to_date,
+    standard_dialog_dir,
     write_metadata_sidecar,
     write_standard_csv,
 )
@@ -274,7 +275,7 @@ class RoutingWidget(QWidget):
         discharge_csv, _ = QFileDialog.getOpenFileName(
             self,
             "选择 M03 河道流量 CSV",
-            "",
+            standard_dialog_dir("output", module_code="M03", output_index=0),
             "CSV files (*.csv);;All files (*.*)",
         )
         if not discharge_csv:
@@ -282,7 +283,7 @@ class RoutingWidget(QWidget):
         flood_depth_tif, _ = QFileDialog.getOpenFileName(
             self,
             "选择 M03 洪水水深 GeoTIFF",
-            "",
+            standard_dialog_dir("output", module_code="M03", output_index=1),
             "GeoTIFF (*.tif *.tiff);;All files (*.*)",
         )
         if not flood_depth_tif:
@@ -290,7 +291,7 @@ class RoutingWidget(QWidget):
         inundation_tif, _ = QFileDialog.getOpenFileName(
             self,
             "选择 M03 模拟淹没范围 GeoTIFF",
-            "",
+            standard_dialog_dir("output", module_code="M03", output_index=2),
             "GeoTIFF (*.tif *.tiff);;All files (*.*)",
         )
         if not inundation_tif:
