@@ -1,0 +1,18 @@
+{
+  "file": "201707_M03_inundation.tif",
+  "module_code": "M03",
+  "module_name": "洪水演进汇流",
+  "field": "flood_depth",
+  "field_name": "洪水水深",
+  "unit": "m",
+  "crs": "EPSG:32642",
+  "crs_name": "WGS84 UTM 42N",
+  "time_step": "daily",
+  "date_field": "date",
+  "date_format": "YYYY-MM-DD",
+  "source_files": [
+    "M02_runoff"
+  ],
+  "created_at": "2026-07-09T12:28:38",
+  "demo_only": true
+}

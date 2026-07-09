@@ -1,0 +1,19 @@
+{
+  "file": "201707_M06_snow_density_gcm3.tif",
+  "module_code": "M06",
+  "module_name": "积雪状态分类",
+  "field": "snow_density",
+  "field_name": "雪密度",
+  "unit": "g/cm3",
+  "crs": "EPSG:32642",
+  "crs_name": "WGS84 UTM 42N",
+  "time_step": "daily",
+  "date_field": "date",
+  "date_format": "YYYY-MM-DD",
+  "source_files": [
+    "M01",
+    "DEM"
+  ],
+  "created_at": "2026-07-09T12:28:38",
+  "demo_only": true
+}

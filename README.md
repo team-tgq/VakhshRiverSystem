@@ -36,11 +36,13 @@ VakhshRiverSystem/
 ├─ app/                               # 主程序框架
 │  ├─ __init__.py
 │  ├─ base_plugin.py
+│  ├─ digital_twin_standard.py         # 数字孪生统一数据规范、字段单位和模块链路
 │  ├─ main_window.py
 │  └─ plugin_manager.py
 │
 ├─ plugins/                           # 功能插件
 │  ├─ flood_plugin/
+│  ├─ integration_overview_plugin/      # 数据整理与流程总览
 │  ├─ inundation_monitoring_plugin/
 │  ├─ monitoring_plugin/               # enabled=false，旧水文监测入口已禁用
 │  ├─ raft_plugin/
@@ -54,6 +56,8 @@ VakhshRiverSystem/
 │  └─ __init__.py
 │
 ├─ output/                            # 输出目录
+├─ docs/                              # 集成说明与模块文档
+├─ sample_data/                       # 轻量样例数据，展示统一目录结构
 ├─ config.py                          # 全局配置
 ├─ main.py                            # 程序入口
 └─ README.md
@@ -191,71 +195,129 @@ algorithms/snow_state/
 
 # 四、系统模块
 
-当前主程序实际启用 9 个插件。`monitoring_plugin` 和 `warning_plugin` 的 `plugin.json` 中设置了 `"enabled": false`，会被插件管理器跳过，不会显示在主界面标签页中。
+当前主程序实际启用 10 个插件。`monitoring_plugin` 和 `warning_plugin` 的 `plugin.json` 中设置了 `"enabled": false`，会被插件管理器跳过，不会显示在主界面标签页中。
 
-## 1 淹没区监测
+为满足集成整改要求，主界面标签顺序已按流域水文过程调整为：
 
-- 插件目录：`plugins/inundation_monitoring_plugin/`
-- 算法目录：`algorithms/inundation_monitoring/`
-- 功能：SAR/遥感影像淹没区识别、模型推理、mask 叠加显示
-- 说明：当前模型结构为 `SegFormerNet`，加载权重时要求 checkpoint 与模型结构一致
+```text
+数据整理与流程总览
+ -> M01 SegFormer专题识别
+ -> M06 积雪状态识别
+ -> M02 雪水当量估算
+ -> M03 洪水演进与汇流模拟
+ -> M09 库区水量估算
+ -> M08 水资源分配
+ -> M07 洪涝风险评估
+ -> M04 淹没区监测（校核）
+ -> M05 RAFT光流测速（校核）
+```
 
-## 2 库区水量估算
+统一数据规范、字段单位、目录构造和模块链路定义见：
 
-- 插件目录：`plugins/reservoir_estimation_plugin/`
-- 算法目录：`algorithms/reservoir_estimation/`
-- 功能：库区面积估算、水库体积估算、结果 CSV 输出
+```text
+app/digital_twin_standard.py
+docs/digital_twin_integration_standard.md
+sample_data/瓦赫什流域孪生数据/
+tools/validate_twin_data.py
+```
 
-## 3 洪涝灾害风险等级评估
+可用下面命令校验样例数据或正式数据目录是否满足统一规范：
 
-- 插件目录：`plugins/flood_plugin/`
-- 算法目录：`algorithms/flood/`
-- 功能：洪涝灾害风险等级识别、GIS 因子分析、风险结果可视化
+```bash
+python tools/validate_twin_data.py
+python tools/validate_twin_data.py "D:/path/to/瓦赫什流域孪生数据"
+```
 
-## 4 RAFT 光流测速
+## 0 数据整理与流程总览
 
-- 插件目录：`plugins/raft_plugin/`
-- 算法目录：`algorithms/raft/`
-- 默认权重：`algorithms/raft/raft-sintel.pth`
-- 功能：输入河道视频，基于 RAFT 密集光流估算表面流速，输出流速、有效帧对、光流可视化和流向角度统计
-- 说明：原水文监测模块中的光流测速能力已拆分到本插件；权重文件不再放在项目根目录
+- 插件目录：`plugins/integration_overview_plugin/`
+- 规范代码：`app/digital_twin_standard.py`
+- 功能：展示统一 CRS、研究时段、baseline/raw/processed 目录、字段单位和 M01-M09 调用链路
+- 样例数据：`sample_data/瓦赫什流域孪生数据/`
+- 说明：该入口用于解决页面演示起点混乱问题，不直接替代各业务算法
 
-## 5 洪水演进与汇流模拟
+## 1 SegFormer 专题识别
 
+- 模块编号：M01
+- 插件目录：`plugins/segformer_plugin/`
+- 算法目录：`algorithms/segformer_service/`
+- 功能：水体识别、积雪识别、遥感语义分割
+- 标准输出：`M01_snow_depth_m.tif`、`M01_snow_cover.tif`、`M01_积雪面积统计表.csv`
+- 说明：该模块使用独立 `segformer` Conda 环境，通过 subprocess 调用推理服务
+
+## 2 积雪状态识别
+
+- 模块编号：M06
+- 插件目录：`plugins/snow_state_plugin/`
+- 算法目录：`algorithms/snow_state/`
+- 功能：基于 Google Earth Engine 的积雪状态识别与融雪径流概率预警
+- 标准输出：`M06_snow_type.tif`、`M06_snow_density_gcm3.tif`
+- 当前 GEE 输出：GeoTIFF 双波段产品，`Snow_State` 表示积雪状态，`Runoff_Probability` 表示湿雪区融雪径流发生概率
+
+## 3 雪水当量估算
+
+- 模块编号：M02
+- 插件目录：`plugins/swe_plugin/`
+- 算法目录：`algorithms/swe/`
+- 功能：日更 SWE 估算、已有业务日结果加载、GFS/VIIRS/DEM 约束融合、SWE 结果图展示
+- 标准输出：`M02_swe_mm.tif`、`M02_runoff_mm.tif`
+
+## 4 洪水演进与汇流模拟
+
+- 模块编号：M03
 - 插件目录：`plugins/routing_plugin/`
 - 算法目录：`algorithms/routing/`
 - Unity 程序目录：`tjk/`
 - 功能：Qt 提供入口、状态提示和异常提示，Unity 可执行程序负责洪水演进三维场景展示
+- 标准输出：`M03_discharge.csv`、`M03_flood_depth_m.tif`、`M03_inundation.tif`
 - 说明：旧的 `FloodRouting` 与 `RunoffRouting` 已不作为主程序模块加载
 
-## 6 SegFormer 专题识别
+## 5 库区水量估算
 
-- 插件目录：`plugins/segformer_plugin/`
-- 算法目录：`algorithms/segformer_service/`
-- 功能：水体识别、积雪识别、遥感语义分割
-- 说明：该模块使用独立 `segformer` Conda 环境，通过 subprocess 调用推理服务
+- 模块编号：M09
+- 插件目录：`plugins/reservoir_estimation_plugin/`
+- 算法目录：`algorithms/reservoir_estimation/`
+- 功能：库区面积估算、水库体积估算、结果 CSV 输出
+- 标准输出：`M09_storage.csv`、`M09_outflow.csv`
 
-## 7 积雪状态识别
+## 6 水资源分配
 
-- 插件目录：`plugins/snow_state_plugin/`
-- 算法目录：`algorithms/snow_state/`
-- 功能：基于 Google Earth Engine 的积雪状态识别与融雪径流概率预警
-- 输入：目标日期范围、SAR 融雪期/参考期、经纬度范围、GEE Project ID、Drive 导出文件夹、数据源 ID
-- 输出：GeoTIFF 双波段产品，`Snow_State` 表示积雪状态，`Runoff_Probability` 表示湿雪区融雪径流发生概率
-
-## 8 雪水当量估算
-
-- 插件目录：`plugins/swe_plugin/`
-- 算法目录：`algorithms/swe/`
-- 功能：日更 SWE 估算、已有业务日结果加载、GFS/VIIRS/DEM 约束融合、SWE 结果图展示
-
-## 9 水资源分配
-
+- 模块编号：M08
 - 插件目录：`plugins/water_allocation_plugin/`
 - 算法目录：`algorithms/water_allocation/`
 - 功能：努列克坝多时间尺度水资源动态优化配置
+- 标准输入：M09 的 `storage.csv` 与 `outflow.csv`
+- 标准输出：`M08_分水方案统计表.csv`
 - 说明：v2.0 使用 NSGA-II 多目标优化，支持 `daily/monthly/yearly` 时间粒度、生活/生态/农业/工业/下游国家五类部门、LSTM 入库径流预测、下游三国需水估算、ET0 与作物需水计算
 - 可选能力：本地/遥感影像智能估算农业面积；缺少 FTW 依赖或权重时，只影响遥感面积估算，不影响核心配水优化
+
+## 7 洪涝灾害风险等级评估
+
+- 模块编号：M07
+- 插件目录：`plugins/flood_plugin/`
+- 算法目录：`algorithms/flood/`
+- 功能：洪涝灾害风险等级识别、GIS 因子分析、风险结果可视化
+- 标准输入：M03 的 `flood_depth.tif`、`inundation.tif`，以及 M04 的实测淹没范围
+- 标准输出：`M07_洪涝风险分区图.tif`
+
+## 8 淹没区监测
+
+- 模块编号：M04
+- 插件目录：`plugins/inundation_monitoring_plugin/`
+- 算法目录：`algorithms/inundation_monitoring/`
+- 功能：SAR/遥感影像淹没区识别、模型推理、mask 叠加显示
+- 标准输出：`实测_淹没范围.tif`、`淹没面积统计报表.xlsx`
+- 说明：当前模型结构为 `SegFormerNet`，加载权重时要求 checkpoint 与模型结构一致
+
+## 9 RAFT 光流测速
+
+- 模块编号：M05
+- 插件目录：`plugins/raft_plugin/`
+- 算法目录：`algorithms/raft/`
+- 默认权重：`algorithms/raft/raft-sintel.pth`
+- 功能：输入河道视频，基于 RAFT 密集光流估算表面流速，输出流速、有效帧对、光流可视化和流向角度统计
+- 标准输出：`实测_流速数据.csv`
+- 说明：原水文监测模块中的光流测速能力已拆分到本插件；权重文件不再放在项目根目录
 
 ## 当前禁用模块
 
@@ -827,6 +889,13 @@ algorithms/segformer_service/environment.yaml
 - 已在有输入项的界面中新增 `i` 说明符号或文字提示。
 - 鼠标悬停在提示符号或输入控件上，可查看“输入内容 + 数据格式 + 示例”。
 - `monitoring_plugin` 和 `warning_plugin` 当前不加载，相关旧输入说明不再作为主程序使用说明。
+
+## 0 数据整理与流程总览（`plugins/integration_overview_plugin`）
+
+- 显示统一 CRS、研究时段、字段单位和模块调用链路
+- 显示样例数据根目录：`sample_data/瓦赫什流域孪生数据/`
+- 可打开整改说明：`docs/digital_twin_integration_standard.md`
+- 用途：作为演示首页，先说明数据规范和计算顺序，再进入业务模块
 
 ## 1 淹没区监测（`plugins/inundation_monitoring_plugin`）
 

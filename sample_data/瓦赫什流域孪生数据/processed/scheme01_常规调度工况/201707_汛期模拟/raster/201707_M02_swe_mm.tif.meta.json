@@ -1,0 +1,20 @@
+{
+  "file": "201707_M02_swe_mm.tif",
+  "module_code": "M02",
+  "module_name": "雪水当量计算",
+  "field": "swe",
+  "field_name": "雪水当量",
+  "unit": "mm",
+  "crs": "EPSG:32642",
+  "crs_name": "WGS84 UTM 42N",
+  "time_step": "daily",
+  "date_field": "date",
+  "date_format": "YYYY-MM-DD",
+  "source_files": [
+    "M01",
+    "M06",
+    "meteo"
+  ],
+  "created_at": "2026-07-09T12:28:38",
+  "demo_only": true
+}

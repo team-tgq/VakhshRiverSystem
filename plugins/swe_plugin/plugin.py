@@ -6,5 +6,8 @@ class Plugin(BasePlugin):
     def name(self):
         return "雪水当量估算"
 
+    def order(self):
+        return 30
+
     def widget(self):
         return SWEWidget()

@@ -6,5 +6,8 @@ class Plugin(BasePlugin):
     def name(self):
         return "RAFT光流测速"
 
+    def order(self):
+        return 90
+
     def widget(self):
         return RaftWidget()
