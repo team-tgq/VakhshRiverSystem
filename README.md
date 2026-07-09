@@ -267,6 +267,7 @@ mark_module_complete(context, "M05")
 
 当前已接入标准成果自动导出的模块：
 
+- `M02 雪水当量估算`：更新最新 SWE 或加载已有结果后，自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_M02_swe_mm.tif` 和 `raster/{period}_M02_runoff_mm.tif`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M04 淹没区监测`：输入 GeoTIFF 时自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M05 RAFT光流测速`：测速完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_实测_流速数据.csv`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M07 洪涝风险评估`：风险评估完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_M07_洪涝风险分区图.tif`，优先使用五级风险等级栅格，并同步写入 `.meta.json` 与 `finish.tag`。
@@ -306,6 +307,7 @@ mark_module_complete(context, "M05")
 - 算法目录：`algorithms/swe/`
 - 功能：日更 SWE 估算、已有业务日结果加载、GFS/VIIRS/DEM 约束融合、SWE 结果图展示
 - 标准输出：`M02_swe_mm.tif`、`M02_runoff_mm.tif`
+- 标准接入：更新最新 SWE 或点击“加载已有结果”时，会按业务日自动同步到统一 `processed` 目录，作为 M03 洪水演进与汇流模拟的径流输入
 
 ## 4 洪水演进与汇流模拟
 
@@ -1005,6 +1007,7 @@ algorithms/segformer_service/environment.yaml
 - 回算最近天数：正整数
 - 可选操作：更新最新 SWE、加载已有结果、重新训练模型
 - 输出：SWE GeoTIFF、Snowmelt、QA 与界面图层展示
+- 标准成果：业务日结果会同步导出为 `raster/{period}_M02_swe_mm.tif` 与 `raster/{period}_M02_runoff_mm.tif`，并写入元数据和完成标记
 - 注意：加载已有结果依赖 `algorithms/swe/swe_assessment.py` 中的已有结果加载接口
 
 ## 9 水资源分配（`plugins/water_allocation_plugin`）
