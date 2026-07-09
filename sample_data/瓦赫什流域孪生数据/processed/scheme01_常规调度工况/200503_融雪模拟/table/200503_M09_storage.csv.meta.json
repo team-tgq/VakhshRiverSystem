@@ -1,0 +1,24 @@
+{
+  "file": "200503_M09_storage.csv",
+  "module_code": "M09",
+  "module_name": "水库库容计算",
+  "field": "storage",
+  "field_name": "库容",
+  "unit": "万m3",
+  "crs": "EPSG:32642",
+  "crs_name": "WGS84 UTM 42N",
+  "time_step": "daily",
+  "date_field": "date",
+  "date_format": "YYYY-MM-DD",
+  "source_files": [
+    "demo sample 200503_M09_storage.csv"
+  ],
+  "created_at": "2026-07-09T14:18:03",
+  "scheme": "scheme01",
+  "scheme_name": "常规调度工况",
+  "period": "200503",
+  "period_name": "融雪模拟",
+  "output_type": "reservoir_storage_timeseries",
+  "demo_only": true,
+  "source_note": "样例数据用于验证目录结构、字段单位、模块链路和元数据说明，不代表真实瓦赫什流域观测值。"
+}

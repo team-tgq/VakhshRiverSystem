@@ -8,6 +8,11 @@ from pathlib import Path
 
 import rasterio
 
+try:
+    import geopandas as gpd
+except Exception:  # pragma: no cover - optional runtime dependency
+    gpd = None
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -57,6 +62,20 @@ REQUIRED_PROCESSED_PERIODS = (
     "processed/scheme02_优化分水工况/200503_融雪模拟",
 )
 
+REQUIRED_METADATA_KEYS = (
+    "file",
+    "module_code",
+    "field",
+    "unit",
+    "crs",
+    "time_step",
+    "date_field",
+    "date_format",
+    "source_files",
+)
+
+BOUND_TOLERANCE_M = 1.0
+
 
 class ValidationReport:
     def __init__(self) -> None:
@@ -104,16 +123,118 @@ def _require_dir(report: ValidationReport, path: Path, label: str) -> None:
         report.error(f"缺少目录 {label}: {path}")
 
 
-def _check_tif_crs(report: ValidationReport, path: Path) -> None:
+def _check_tif_crs(report: ValidationReport, path: Path):
     try:
         with rasterio.open(path) as ds:
             crs = ds.crs.to_string() if ds.crs else ""
             if crs == TARGET_CRS:
                 report.ok(f"GeoTIFF CRS={TARGET_CRS}: {path.name}")
+                return ds.bounds
             else:
                 report.error(f"GeoTIFF 坐标系不统一: {path}，当前 {crs or 'None'}，应为 {TARGET_CRS}")
     except Exception as exc:
         report.error(f"GeoTIFF 无法读取: {path} ({exc})")
+    return None
+
+
+def _check_vector_crs(report: ValidationReport, path: Path):
+    if gpd is None:
+        report.warn(f"未安装 geopandas，跳过矢量 CRS 校验: {path.name}")
+        return None
+
+    try:
+        gdf = gpd.read_file(path)
+    except Exception as exc:
+        report.error(f"矢量文件无法读取: {path} ({exc})")
+        return None
+
+    if gdf.empty:
+        report.error(f"矢量文件无要素: {path}")
+        return None
+
+    epsg = gdf.crs.to_epsg() if gdf.crs is not None else None
+    if epsg == 32642:
+        report.ok(f"矢量 CRS={TARGET_CRS}: {path.name}")
+    else:
+        report.error(f"矢量坐标系不统一: {path}，当前 {gdf.crs or 'None'}，应为 {TARGET_CRS}")
+        return None
+
+    return tuple(float(value) for value in gdf.total_bounds)
+
+
+def _bounds_within(inner, outer, tolerance: float = BOUND_TOLERANCE_M) -> bool:
+    return (
+        inner[0] >= outer[0] - tolerance
+        and inner[1] >= outer[1] - tolerance
+        and inner[2] <= outer[2] + tolerance
+        and inner[3] <= outer[3] + tolerance
+    )
+
+
+def _bounds_tuple(bounds) -> tuple[float, float, float, float]:
+    if hasattr(bounds, "left"):
+        return (float(bounds.left), float(bounds.bottom), float(bounds.right), float(bounds.top))
+    return tuple(float(value) for value in bounds)
+
+
+def _check_bounds_within_watershed(
+    report: ValidationReport,
+    path: Path,
+    bounds,
+    watershed_bounds: tuple[float, float, float, float] | None,
+) -> None:
+    if bounds is None or watershed_bounds is None:
+        return
+    inner = _bounds_tuple(bounds)
+    if _bounds_within(inner, watershed_bounds):
+        report.ok(f"范围位于流域边界内: {path.name}")
+    else:
+        report.error(
+            "数据范围超出流域边界: "
+            f"{path}，当前 {inner}，流域边界 {watershed_bounds}"
+        )
+
+
+def _check_metadata_sidecar(report: ValidationReport, path: Path, module_code: str | None = None) -> None:
+    metadata_path = path.with_suffix(path.suffix + ".meta.json")
+    if not metadata_path.exists():
+        report.error(f"缺少元数据说明: {metadata_path}")
+        return
+
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        report.error(f"元数据无法读取: {metadata_path} ({exc})")
+        return
+
+    missing = [key for key in REQUIRED_METADATA_KEYS if key not in payload]
+    if missing:
+        report.error(f"元数据缺少字段 {missing}: {metadata_path}")
+        return
+
+    if payload.get("file") != path.name:
+        report.error(f"元数据 file 与成果文件名不一致: {metadata_path}")
+        return
+    if module_code and payload.get("module_code") != module_code:
+        report.error(f"元数据 module_code 不一致: {metadata_path}，应为 {module_code}")
+        return
+    if payload.get("crs") != TARGET_CRS:
+        report.error(f"元数据 CRS 不统一: {metadata_path}，当前 {payload.get('crs')}，应为 {TARGET_CRS}")
+        return
+    if payload.get("time_step") != "daily":
+        report.error(f"元数据 time_step 不统一: {metadata_path}，应为 daily")
+        return
+    if payload.get("date_field") != DATE_FIELD:
+        report.error(f"元数据 date_field 不统一: {metadata_path}，应为 {DATE_FIELD}")
+        return
+    if payload.get("date_format") != "YYYY-MM-DD":
+        report.error(f"元数据 date_format 不统一: {metadata_path}")
+        return
+    if not isinstance(payload.get("source_files"), list) or not payload["source_files"]:
+        report.error(f"元数据 source_files 不能为空: {metadata_path}")
+        return
+
+    report.ok(f"元数据说明完整: {metadata_path.name}")
 
 
 def _check_csv_date(report: ValidationReport, path: Path) -> None:
@@ -153,6 +274,16 @@ def _expected_outputs_for_period(period_token: str) -> tuple[str, ...]:
     return tuple(outputs)
 
 
+def _module_code_for_output(relative_output: str) -> str | None:
+    normalized = relative_output.replace("\\", "/")
+    period_token = Path(normalized).name.split("_", 1)[0]
+    for spec in MODULE_SPECS:
+        for pattern in spec.outputs:
+            if pattern.format(period=period_token) == normalized:
+                return spec.code
+    return None
+
+
 def validate(root: Path) -> ValidationReport:
     report = ValidationReport()
     _require_dir(report, root, "孪生数据根目录")
@@ -166,9 +297,20 @@ def validate(root: Path) -> ValidationReport:
 
     for name in REQUIRED_BASELINE_FILES:
         _require_file(report, baseline / name, f"baseline/{name}")
+    watershed_bounds = None
+    watershed_shp = baseline / "流域边界.shp"
+    if watershed_shp.exists():
+        watershed_bounds = _check_vector_crs(report, watershed_shp)
+    for name in ("河网.shp", "水库边界.shp"):
+        path = baseline / name
+        if path.exists():
+            bounds = _check_vector_crs(report, path)
+            _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
     dem = baseline / "DEM.tif"
     if dem.exists():
-        _check_tif_crs(report, dem)
+        bounds = _check_tif_crs(report, dem)
+        _check_bounds_within_watershed(report, dem, bounds, watershed_bounds)
+        _check_metadata_sidecar(report, dem)
 
     for period_dir_name, files in REQUIRED_RAW_PERIOD_FILES.items():
         period_dir = raw / period_dir_name
@@ -177,7 +319,9 @@ def validate(root: Path) -> ValidationReport:
             path = period_dir / name
             _require_file(report, path, f"raw/{period_dir_name}/{name}")
             if path.suffix.lower() == ".tif" and path.exists():
-                _check_tif_crs(report, path)
+                bounds = _check_tif_crs(report, path)
+                _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
+                _check_metadata_sidecar(report, path)
             if path.suffix.lower() == ".csv" and path.exists():
                 _check_csv_date(report, path)
 
@@ -197,10 +341,16 @@ def validate(root: Path) -> ValidationReport:
         for output in _expected_outputs_for_period(period_token):
             path = period_dir / output
             _require_file(report, path, f"{rel}/{output}")
+            module_code = _module_code_for_output(output)
             if path.suffix.lower() == ".tif" and path.exists():
-                _check_tif_crs(report, path)
+                bounds = _check_tif_crs(report, path)
+                _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
+                _check_metadata_sidecar(report, path, module_code=module_code)
             if path.suffix.lower() == ".csv" and path.exists():
                 _check_csv_date(report, path)
+                _check_metadata_sidecar(report, path, module_code=module_code)
+            if path.suffix.lower() == ".xlsx" and path.exists():
+                _check_metadata_sidecar(report, path, module_code=module_code)
 
     return report
 

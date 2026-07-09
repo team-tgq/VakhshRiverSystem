@@ -1,0 +1,24 @@
+{
+  "file": "200503_淹没面积统计报表.xlsx",
+  "module_code": "M04",
+  "module_name": "SAR卫星淹没提取",
+  "field": "inundated_area",
+  "field_name": "淹没面积",
+  "unit": "km2",
+  "crs": "EPSG:32642",
+  "crs_name": "WGS84 UTM 42N",
+  "time_step": "daily",
+  "date_field": "date",
+  "date_format": "YYYY-MM-DD",
+  "source_files": [
+    "demo sample 200503_淹没面积统计报表.xlsx"
+  ],
+  "created_at": "2026-07-09T14:18:03",
+  "scheme": "scheme01",
+  "scheme_name": "常规调度工况",
+  "period": "200503",
+  "period_name": "融雪模拟",
+  "output_type": "inundated_area_report",
+  "demo_only": true,
+  "source_note": "样例数据用于验证目录结构、字段单位、模块链路和元数据说明，不代表真实瓦赫什流域观测值。"
+}
