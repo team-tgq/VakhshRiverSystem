@@ -267,6 +267,7 @@ mark_module_complete(context, "M05")
 
 当前已接入标准成果自动导出的模块：
 
+- `M04 淹没区监测`：输入 GeoTIFF 时自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M05 RAFT光流测速`：测速完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_实测_流速数据.csv`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M08 水资源分配`：NSGA-II 优化完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_M08_分水方案统计表.csv`，字段包含部门需水量、放水量、地下水量、实收水量、缺水量和满足率。
 
@@ -351,6 +352,7 @@ mark_module_complete(context, "M05")
 - 算法目录：`algorithms/inundation_monitoring/`
 - 功能：SAR/遥感影像淹没区识别、模型推理、mask 叠加显示
 - 标准输出：`实测_淹没范围.tif`、`淹没面积统计报表.xlsx`
+- 标准接入：GeoTIFF 输入完成识别后自动导出标准淹没范围 GeoTIFF、统计报表、旁路元数据和 `finish.tag`；普通 png/jpg 无 CRS，不作为标准 GIS 成果导出
 - 说明：当前模型结构为 `SegFormerNet`，加载权重时要求 checkpoint 与模型结构一致
 
 ## 9 RAFT 光流测速

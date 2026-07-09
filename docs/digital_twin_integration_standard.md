@@ -189,6 +189,7 @@ mark_module_complete(context, "M05")
 
 当前已完成标准成果自动导出的插件：
 
+- `M04 SAR/遥感淹没区监测`：输入 GeoTIFF 时自动写入 `raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并写入旁路元数据与 `finish.tag`。普通 png/jpg 因缺少 CRS，只保留界面预览结果，不进入正式 GIS 成果链路。
 - `M05 RAFT 光流测速`：自动写入 `table/{period}_实测_流速数据.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`method`、`velocity_m_s`、`mean_flow_direction_deg`、`fps`、`frame_count`、`valid_pairs`。
 - `M08 水资源分配`：自动写入 `table/{period}_M08_分水方案统计表.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`time_scale`、`sector`、`demand_million_m3`、`surface_release_million_m3`、`groundwater_million_m3`、`received_million_m3`、`shortage_million_m3`、`satisfaction_ratio_pct`。
 
