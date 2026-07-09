@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
+import numpy as np
+import rasterio
+import rasterio.warp
 from PyQt5.QtCore import QDate
 from PyQt5.QtWidgets import (
     QDateEdit,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -30,7 +35,99 @@ from algorithms.snow_state import (
     parse_bbox_text,
     submit_runoff_warning_export,
 )
+from app.digital_twin_standard import (
+    TARGET_CRS,
+    default_run_context,
+    mark_module_complete,
+    module_output_path,
+    write_metadata_sidecar,
+)
 from app.ui_hints import attach_hint, label_with_hint
+from rasterio.enums import Resampling
+
+
+SNOW_DENSITY_BY_TYPE_GCM3 = {
+    1: 0.0,
+    2: 0.25,
+    3: 0.40,
+}
+
+
+def _context_from_target_date(date_text: str | None):
+    text = str(date_text or "").strip()
+    if len(text) >= 7 and text[4] == "-":
+        period = text[:7].replace("-", "")
+        month = int(text[5:7])
+    elif len(text) >= 6 and text[:6].isdigit():
+        period = text[:6]
+        month = int(period[4:6])
+    else:
+        period = "200503"
+        month = 3
+
+    if 3 <= month <= 5:
+        period_name = "融雪模拟"
+    elif 6 <= month <= 9:
+        period_name = "汛期模拟"
+    else:
+        period_name = "积雪状态模拟"
+    return default_run_context(period=period, period_name=period_name)
+
+
+def _read_state_band_as_target(src_path: str | Path):
+    path = Path(src_path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    with rasterio.open(path) as src:
+        band_count = src.count
+        if src.count < 1:
+            raise ValueError("GeoTIFF 至少需要包含 Snow_State 波段。")
+        if src.crs is None:
+            raise ValueError(f"源 GeoTIFF 缺少 CRS，不能写入标准成果: {path}")
+
+        src_crs = src.crs
+        if src_crs.to_string() == TARGET_CRS:
+            state = src.read(1)
+            transform = src.transform
+            width = src.width
+            height = src.height
+        else:
+            transform, width, height = rasterio.warp.calculate_default_transform(
+                src_crs,
+                TARGET_CRS,
+                src.width,
+                src.height,
+                *src.bounds,
+            )
+            state = np.zeros((height, width), dtype=np.float32)
+            rasterio.warp.reproject(
+                source=rasterio.band(src, 1),
+                destination=state,
+                src_transform=src.transform,
+                src_crs=src_crs,
+                dst_transform=transform,
+                dst_crs=TARGET_CRS,
+                resampling=Resampling.nearest,
+                src_nodata=src.nodata,
+                dst_nodata=0,
+            )
+
+        nodata = src.nodata
+
+    state = np.asarray(np.rint(state), dtype=np.int16)
+    if nodata is not None and np.isfinite(nodata):
+        state = np.where(state == int(round(nodata)), 0, state)
+    valid_classes = np.array(list(SNOW_DENSITY_BY_TYPE_GCM3), dtype=np.int16)
+    state = np.where(np.isin(state, valid_classes), state, 0)
+    return state.astype(np.uint8), transform, width, height, band_count
+
+
+def _density_from_state(state: np.ndarray) -> np.ndarray:
+    density = np.full(state.shape, -9999.0, dtype=np.float32)
+    for class_value, density_value in SNOW_DENSITY_BY_TYPE_GCM3.items():
+        density[state == class_value] = density_value
+    return density
 
 
 class SnowStateWidget(QWidget):
@@ -155,14 +252,17 @@ class SnowStateWidget(QWidget):
 
         self.init_btn = QPushButton("初始化 GEE")
         self.run_btn = QPushButton("提交预警产品任务")
+        self.sync_btn = QPushButton("同步已下载GeoTIFF")
         self.reset_btn = QPushButton("恢复默认参数")
 
         self.init_btn.clicked.connect(self.initialize_gee)
         self.run_btn.clicked.connect(self.run_task)
+        self.sync_btn.clicked.connect(self.sync_downloaded_geotiff)
         self.reset_btn.clicked.connect(self.reset_defaults)
 
         row.addWidget(self.init_btn)
         row.addWidget(self.run_btn)
+        row.addWidget(self.sync_btn)
         row.addWidget(self.reset_btn)
         row.addStretch()
 
@@ -276,6 +376,7 @@ class SnowStateWidget(QWidget):
             self.append_log(f"任务状态: {result['task_state']}")
             if result.get("task_id"):
                 self.append_log(f"任务 ID: {result['task_id']}")
+            self.append_log("Drive GeoTIFF 下载到本地后，可点击“同步已下载GeoTIFF”写入标准成果目录。")
 
             QMessageBox.information(
                 self,
@@ -285,6 +386,101 @@ class SnowStateWidget(QWidget):
         except Exception as exc:
             self.append_log(f"[ERROR] {exc}")
             QMessageBox.critical(self, "任务提交失败", str(exc))
+
+    def sync_downloaded_geotiff(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择已下载的 GEE GeoTIFF",
+            "",
+            "GeoTIFF (*.tif *.tiff);;All files (*.*)",
+        )
+        if not path:
+            return
+
+        try:
+            target_start = self.target_start_edit.date().toString("yyyy-MM-dd")
+            outputs = self._export_standard_geotiff(Path(path), target_start)
+            self.append_log("M06 标准成果已同步。")
+            self.append_log(f"雪状态: {outputs['snow_type']}")
+            self.append_log(f"雪密度: {outputs['snow_density']}")
+            QMessageBox.information(self, "同步完成", "已写入 M06 标准成果目录。")
+        except Exception as exc:
+            self.append_log(f"[ERROR] {exc}")
+            QMessageBox.critical(self, "同步失败", str(exc))
+
+    def _export_standard_geotiff(self, geotiff_path: str | Path, target_date: str | None = None) -> dict[str, Path]:
+        context = _context_from_target_date(target_date)
+        snow_type_tif = module_output_path("M06", context=context, output_index=0)
+        snow_density_tif = module_output_path("M06", context=context, output_index=1)
+
+        state, transform, width, height, band_count = _read_state_band_as_target(geotiff_path)
+        density = _density_from_state(state)
+
+        snow_type_tif.parent.mkdir(parents=True, exist_ok=True)
+        state_profile = {
+            "driver": "GTiff",
+            "height": height,
+            "width": width,
+            "count": 1,
+            "dtype": "uint8",
+            "crs": TARGET_CRS,
+            "transform": transform,
+            "nodata": 0,
+            "compress": "lzw",
+        }
+        with rasterio.open(snow_type_tif, "w", **state_profile) as dst:
+            dst.write(state, 1)
+
+        density_profile = {
+            "driver": "GTiff",
+            "height": height,
+            "width": width,
+            "count": 1,
+            "dtype": "float32",
+            "crs": TARGET_CRS,
+            "transform": transform,
+            "nodata": -9999.0,
+            "compress": "lzw",
+        }
+        with rasterio.open(snow_density_tif, "w", **density_profile) as dst:
+            dst.write(density, 1)
+
+        source_files = [geotiff_path]
+        common_extra = {
+            "scheme": context.scheme,
+            "scheme_name": context.scheme_name,
+            "period": context.period,
+            "period_name": context.period_name,
+            "source_product": "GEE Snow_State + Runoff_Probability GeoTIFF",
+            "source_band_count": band_count,
+            "source_band_1": "Snow_State",
+        }
+        if band_count >= 2:
+            common_extra["source_band_2"] = "Runoff_Probability"
+        write_metadata_sidecar(
+            snow_type_tif,
+            module_code="M06",
+            field="snow_type",
+            source_files=source_files,
+            extra={
+                **common_extra,
+                "standard_field": "snow_type",
+                "class_labels": STATE_LABELS,
+            },
+        )
+        write_metadata_sidecar(
+            snow_density_tif,
+            module_code="M06",
+            field="snow_density",
+            source_files=source_files,
+            extra={
+                **common_extra,
+                "density_mapping_gcm3": SNOW_DENSITY_BY_TYPE_GCM3,
+                "density_mapping_note": "当前由 Snow_State 类别确定性映射：无雪=0，干雪=0.25，湿雪=0.40；后续可替换为实测或模型雪密度。",
+            },
+        )
+        mark_module_complete(context, "M06")
+        return {"snow_type": snow_type_tif, "snow_density": snow_density_tif}
 
     def _validate_date_range(self, start_edit, end_edit, label):
         if start_edit.date() > end_edit.date():

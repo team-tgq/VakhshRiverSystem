@@ -267,6 +267,7 @@ mark_module_complete(context, "M05")
 
 当前已接入标准成果自动导出的模块：
 
+- `M06 积雪状态识别`：GEE 双波段 GeoTIFF 下载到本地后，可在模块中点击“同步已下载GeoTIFF”，自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_M06_snow_type.tif` 和 `raster/{period}_M06_snow_density_gcm3.tif`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M02 雪水当量估算`：更新最新 SWE 或加载已有结果后，自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_M02_swe_mm.tif` 和 `raster/{period}_M02_runoff_mm.tif`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M04 淹没区监测`：输入 GeoTIFF 时自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M05 RAFT光流测速`：测速完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_实测_流速数据.csv`，并同步写入 `.meta.json` 与 `finish.tag`。
@@ -300,6 +301,7 @@ mark_module_complete(context, "M05")
 - 功能：基于 Google Earth Engine 的积雪状态识别与融雪径流概率预警
 - 标准输出：`M06_snow_type.tif`、`M06_snow_density_gcm3.tif`
 - 当前 GEE 输出：GeoTIFF 双波段产品，`Snow_State` 表示积雪状态，`Runoff_Probability` 表示湿雪区融雪径流发生概率
+- 标准接入：GEE 导出任务完成并下载 GeoTIFF 后，点击“同步已下载GeoTIFF”可拆分为标准雪状态和雪密度栅格；雪密度当前由 `Snow_State` 类别映射生成，后续可替换为实测或模型雪密度
 
 ## 3 雪水当量估算
 
@@ -1004,6 +1006,8 @@ algorithms/segformer_service/environment.yaml
 - Drive 文件夹：Google Drive 导出目录
 - 导出分辨率：正整数，单位 `m`
 - 输出波段：`Snow_State` 与 `Runoff_Probability`
+- 标准成果：下载 GEE GeoTIFF 后点击“同步已下载GeoTIFF”，输出 `raster/{period}_M06_snow_type.tif` 与 `raster/{period}_M06_snow_density_gcm3.tif`
+- 说明：`M06_snow_density_gcm3.tif` 当前由状态类别映射生成，无雪=0、干雪=0.25、湿雪=0.40，便于 M02 使用统一输入；真实雪密度模型确认后可替换
 
 ## 8 雪水当量估算（`plugins/swe_plugin`）
 

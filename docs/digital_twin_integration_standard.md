@@ -189,6 +189,7 @@ mark_module_complete(context, "M05")
 
 当前已完成标准成果自动导出的插件：
 
+- `M06 积雪状态识别`：GEE 双波段 GeoTIFF 下载到本地后，可在插件中同步写入 `raster/{period}_M06_snow_type.tif` 与 `raster/{period}_M06_snow_density_gcm3.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。当前雪密度由 `Snow_State` 类别映射生成，真实雪密度模型确认后可替换。
 - `M02 雪水当量估算`：更新最新 SWE 或加载已有结果后，自动写入 `raster/{period}_M02_swe_mm.tif` 与 `raster/{period}_M02_runoff_mm.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
 - `M04 SAR/遥感淹没区监测`：输入 GeoTIFF 时自动写入 `raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并写入旁路元数据与 `finish.tag`。普通 png/jpg 因缺少 CRS，只保留界面预览结果，不进入正式 GIS 成果链路。
 - `M05 RAFT 光流测速`：自动写入 `table/{period}_实测_流速数据.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`method`、`velocity_m_s`、`mean_flow_direction_deg`、`fps`、`frame_count`、`valid_pairs`。
@@ -238,7 +239,7 @@ python main.py
 ## 9. 待刘老师或模块负责人确认事项
 
 - M01 当前由 SegFormer 专题识别承担，是否需要同时输出水体识别成果进入 M03 或 M07。
-- M06 积雪状态识别当前 GEE 输出 `Snow_State` 与 `Runoff_Probability`，是否需要在标准成果中转换为 `snow_type` 和 `snow_density` 两个文件。
+- M06 积雪状态识别已将 GEE 输出转换为 `snow_type` 和 `snow_density` 两个标准文件；其中雪密度当前为类别映射值，仍需确认是否替换为实测或独立模型雪密度。
 - M03 洪水演进与 Unity 三维展示之间的数据接口是否只读 `processed/`，还是需要额外三维场景缓存目录。
 - M09 库区水量估算已生成 `M09_outflow.csv` 标准接口文件，但真实下泄流量仍缺少可追溯来源；需要确认出库流量来源、单位和时间步长后替换当前缺测占位。
 - M04/M05 是否只做人工校核，还是要在界面中自动参与参数率定。
