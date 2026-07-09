@@ -7,5 +7,8 @@ class Plugin(BasePlugin):
     def name(self):
         return "洪涝风险评估"
 
+    def order(self):
+        return 70
+
     def widget(self):
         return FloodWidget()

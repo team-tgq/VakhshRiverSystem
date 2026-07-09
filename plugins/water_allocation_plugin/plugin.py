@@ -6,5 +6,8 @@ class Plugin(BasePlugin):
     def name(self):
         return "水资源分配"
 
+    def order(self):
+        return 60
+
     def widget(self):
         return WaterAllocationWidget()

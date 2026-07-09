@@ -1,0 +1,18 @@
+{
+  "file": "200503_SAR影像.tif",
+  "module_code": "M04",
+  "module_name": "SAR卫星淹没提取",
+  "field": "flood_depth",
+  "field_name": "洪水水深",
+  "unit": "m",
+  "crs": "EPSG:32642",
+  "crs_name": "WGS84 UTM 42N",
+  "time_step": "daily",
+  "date_field": "date",
+  "date_format": "YYYY-MM-DD",
+  "source_files": [
+    "demo sar"
+  ],
+  "created_at": "2026-07-09T12:28:38",
+  "demo_only": true
+}

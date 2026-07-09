@@ -6,5 +6,8 @@ class Plugin(BasePlugin):
     def name(self):
         return "SegFormer专题识别"
 
+    def order(self):
+        return 10
+
     def widget(self):
         return SegFormerWidget()

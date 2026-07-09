@@ -7,5 +7,8 @@ class Plugin(BasePlugin):
     def name(self):
         return "洪水演进与汇流模拟"
 
+    def order(self):
+        return 40
+
     def widget(self):
         return RoutingWidget()
