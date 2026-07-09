@@ -32,6 +32,13 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from app.digital_twin_standard import (
+    TARGET_CRS,
+    default_run_context,
+    mark_module_complete,
+    module_output_path,
+    write_metadata_sidecar,
+)
 from algorithms.swe import swe_assessment
 
 
@@ -46,6 +53,81 @@ INPUT_DATA_TEXT = (
     "DEM 订正：若检测到 SWE_DEM_PATH 或现成 DEM，会按高程直减率对温度做订正，并同步重算固态降水。\n"
     "界面只展示 SWE；Snowmelt 和 QA 仍在后台计算并供下游模块使用。"
 )
+
+
+def _business_date_to_context(business_date: str | None):
+    date_text = str(business_date or "").strip()
+    if len(date_text) >= 10 and date_text[4] == "-" and date_text[7] == "-":
+        year = int(date_text[:4])
+        month = int(date_text[5:7])
+        day = int(date_text[8:10])
+        period = f"{year:04d}{month:02d}{day:02d}"
+    else:
+        period = date_text.replace("-", "") or "200503"
+        month = int(period[4:6]) if len(period) >= 6 and period[4:6].isdigit() else 3
+
+    if 3 <= month <= 5:
+        period_name = "融雪模拟"
+    elif 6 <= month <= 9:
+        period_name = "汛期模拟"
+    else:
+        period_name = "日尺度模拟"
+    return default_run_context(period=period, period_name=period_name)
+
+
+def _copy_or_reproject_continuous_raster(src_path: str | Path, dst_path: str | Path) -> Path:
+    src_path = Path(src_path)
+    dst_path = Path(dst_path)
+    if not src_path.exists():
+        raise FileNotFoundError(f"源栅格不存在: {src_path}")
+
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    with rasterio.open(src_path) as src:
+        profile = src.profile.copy()
+        src_crs = src.crs
+        if src_crs is None:
+            raise ValueError(f"源栅格缺少 CRS，不能写入标准成果: {src_path}")
+
+        if src_crs.to_string() == TARGET_CRS:
+            data = src.read()
+            profile.update(driver="GTiff", compress="lzw")
+            with rasterio.open(dst_path, "w", **profile) as dst:
+                dst.write(data)
+            return dst_path
+
+        transform, width, height = rasterio.warp.calculate_default_transform(
+            src_crs,
+            TARGET_CRS,
+            src.width,
+            src.height,
+            *src.bounds,
+        )
+        profile.update(
+            driver="GTiff",
+            crs=TARGET_CRS,
+            transform=transform,
+            width=width,
+            height=height,
+            compress="lzw",
+        )
+        nodata = src.nodata if src.nodata is not None else np.nan
+        destination = np.full((src.count, height, width), nodata, dtype=np.float32)
+        for band_index in range(1, src.count + 1):
+            rasterio.warp.reproject(
+                source=rasterio.band(src, band_index),
+                destination=destination[band_index - 1],
+                src_transform=src.transform,
+                src_crs=src_crs,
+                dst_transform=transform,
+                dst_crs=TARGET_CRS,
+                resampling=Resampling.bilinear,
+                src_nodata=src.nodata,
+                dst_nodata=src.nodata,
+            )
+        profile.update(dtype="float32")
+        with rasterio.open(dst_path, "w", **profile) as dst:
+            dst.write(destination.astype(np.float32))
+    return dst_path
 
 
 class SWEWorker(QObject):
@@ -362,8 +444,11 @@ class SWEWidget(QWidget):
         self._worker_thread.start()
 
     def _handle_worker_success(self, result: dict) -> None:
+        exported = self._export_standard_results(result)
         self.result = result
         self.populate_results()
+        if exported:
+            self._log(f"已同步 {exported} 个业务日的 M02 标准成果。")
         if self._success_message:
             self._log(self._success_message)
 
@@ -504,6 +589,10 @@ class SWEWidget(QWidget):
     def load_existing_results(self, silent: bool = False) -> None:
         try:
             self.result = swe_assessment.load_existing_results()
+            if not silent:
+                exported = self._export_standard_results(self.result)
+                if exported:
+                    self._log(f"已同步 {exported} 个业务日的 M02 标准成果。")
             self.populate_results()
             if not silent:
                 self._log("已加载已有 SWE 结果。")
@@ -511,3 +600,74 @@ class SWEWidget(QWidget):
             if not silent:
                 self._log(f"[ERROR] {exc}")
                 QMessageBox.critical(self, "加载失败", str(exc))
+
+    def _export_standard_results(self, result: dict | None) -> int:
+        if not result:
+            return 0
+        entries = result.get("entries") or []
+        exported = 0
+        for entry in entries:
+            try:
+                self._export_standard_entry(entry)
+                exported += 1
+            except Exception as exc:
+                self._log(f"[WARN] M02 标准成果未导出 {entry.get('business_date', '-')}: {exc}")
+        return exported
+
+    def _export_standard_entry(self, entry: dict) -> dict[str, str]:
+        context = _business_date_to_context(entry.get("business_date"))
+        swe_source = entry.get("swe_raster")
+        runoff_source = entry.get("snowmelt_raster")
+        if not swe_source:
+            raise ValueError("缺少 SWE 栅格路径。")
+        if not runoff_source:
+            raise ValueError("缺少融雪/径流栅格路径。")
+
+        swe_output = module_output_path("M02", context=context, output_index=0)
+        runoff_output = module_output_path("M02", context=context, output_index=1)
+        _copy_or_reproject_continuous_raster(swe_source, swe_output)
+        _copy_or_reproject_continuous_raster(runoff_source, runoff_output)
+
+        source_files = [
+            swe_source,
+            runoff_source,
+            entry.get("forcing_cache", ""),
+        ]
+        write_metadata_sidecar(
+            swe_output,
+            module_code="M02",
+            field="swe",
+            source_files=source_files,
+            extra={
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "period": context.period,
+                "period_name": context.period_name,
+                "business_date": entry.get("business_date"),
+                "swe_mm": entry.get("swe_mm"),
+                "source_status": entry.get("source_status"),
+                "viirs_status": entry.get("viirs_status"),
+            },
+        )
+        write_metadata_sidecar(
+            runoff_output,
+            module_code="M02",
+            field="runoff",
+            source_files=source_files,
+            extra={
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "period": context.period,
+                "period_name": context.period_name,
+                "business_date": entry.get("business_date"),
+                "snowmelt_mm_day": entry.get("snowmelt_mm_day"),
+                "source_status": entry.get("source_status"),
+            },
+        )
+        mark_module_complete(context, "M02")
+        entry["standard_swe_raster"] = str(swe_output)
+        entry["standard_runoff_raster"] = str(runoff_output)
+        return {
+            "swe": str(swe_output),
+            "runoff": str(runoff_output),
+        }
