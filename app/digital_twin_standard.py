@@ -55,6 +55,7 @@ RAW_TO_PROCESSED_PERIOD_NAMES = {
 STANDARD_FIELDS = {
     "snow_depth": {"name": "积雪深度", "unit": "m"},
     "snow_cover": {"name": "积雪覆盖率", "unit": "0-1"},
+    "snow_type": {"name": "积雪状态类型", "unit": "class"},
     "snow_density": {"name": "雪密度", "unit": "g/cm3"},
     "swe": {"name": "雪水当量", "unit": "mm"},
     "runoff": {"name": "径流深度", "unit": "mm"},
