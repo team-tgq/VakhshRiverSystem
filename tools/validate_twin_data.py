@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+from datetime import datetime
 import sys
 from pathlib import Path
 
@@ -19,9 +20,15 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.digital_twin_standard import (  # noqa: E402
     DATE_FIELD,
+    DATE_FORMAT,
     DEFAULT_TWIN_DATA_ROOT,
     MODULE_SPECS,
+    SAMPLE_TWIN_DATA_ROOT,
+    STANDARD_FIELDS,
+    STUDY_YEAR_END,
+    STUDY_YEAR_START,
     TARGET_CRS,
+    TIME_STEP,
 )
 
 
@@ -75,6 +82,7 @@ REQUIRED_METADATA_KEYS = (
 )
 
 BOUND_TOLERANCE_M = 1.0
+PY_DATE_FORMAT = "%Y-%m-%d"
 
 
 class ValidationReport:
@@ -195,7 +203,56 @@ def _check_bounds_within_watershed(
         )
 
 
-def _check_metadata_sidecar(report: ValidationReport, path: Path, module_code: str | None = None) -> None:
+def _is_sample_root(root: Path) -> bool:
+    try:
+        return root.resolve() == SAMPLE_TWIN_DATA_ROOT.resolve()
+    except Exception:
+        return False
+
+
+def _check_year_in_study_range(report: ValidationReport, year: int, label: str) -> bool:
+    if STUDY_YEAR_START <= year <= STUDY_YEAR_END:
+        return True
+    report.error(f"时间超出统一研究时段 {STUDY_YEAR_START}-{STUDY_YEAR_END}: {label}")
+    return False
+
+
+def _parse_date(report: ValidationReport, value: str, label: str):
+    try:
+        parsed = datetime.strptime(str(value).strip(), PY_DATE_FORMAT).date()
+    except Exception:
+        report.error(f"日期格式不统一，应为 {DATE_FORMAT}: {label}={value!r}")
+        return None
+    _check_year_in_study_range(report, parsed.year, f"{label}={value}")
+    return parsed
+
+
+def _check_period_token(report: ValidationReport, token: str, label: str) -> None:
+    if not token.isdigit() or len(token) not in (6, 8):
+        report.error(f"时段命名不规范，应为 YYYYMM 或 YYYYMMDD: {label}")
+        return
+
+    year = int(token[:4])
+    month = int(token[4:6])
+    if not 1 <= month <= 12:
+        report.error(f"时段月份不合法: {label}")
+        return
+    if not _check_year_in_study_range(report, year, label):
+        return
+
+    if len(token) == 8:
+        _parse_date(report, f"{token[:4]}-{token[4:6]}-{token[6:8]}", label)
+    else:
+        report.ok(f"时段位于统一研究时段: {label}")
+
+
+def _check_metadata_sidecar(
+    report: ValidationReport,
+    path: Path,
+    module_code: str | None = None,
+    *,
+    allow_demo_only: bool = True,
+) -> None:
     metadata_path = path.with_suffix(path.suffix + ".meta.json")
     if not metadata_path.exists():
         report.error(f"缺少元数据说明: {metadata_path}")
@@ -218,20 +275,34 @@ def _check_metadata_sidecar(report: ValidationReport, path: Path, module_code: s
     if module_code and payload.get("module_code") != module_code:
         report.error(f"元数据 module_code 不一致: {metadata_path}，应为 {module_code}")
         return
+    field = str(payload.get("field", ""))
+    field_info = STANDARD_FIELDS.get(field)
+    if field_info is None:
+        report.error(f"元数据 field 未在全局字段表中定义: {metadata_path}，field={field}")
+        return
+    if payload.get("unit") != field_info["unit"]:
+        report.error(
+            f"元数据 unit 与全局字段表不一致: {metadata_path}，"
+            f"当前 {payload.get('unit')}，应为 {field_info['unit']}"
+        )
+        return
     if payload.get("crs") != TARGET_CRS:
         report.error(f"元数据 CRS 不统一: {metadata_path}，当前 {payload.get('crs')}，应为 {TARGET_CRS}")
         return
-    if payload.get("time_step") != "daily":
-        report.error(f"元数据 time_step 不统一: {metadata_path}，应为 daily")
+    if payload.get("time_step") != TIME_STEP:
+        report.error(f"元数据 time_step 不统一: {metadata_path}，应为 {TIME_STEP}")
         return
     if payload.get("date_field") != DATE_FIELD:
         report.error(f"元数据 date_field 不统一: {metadata_path}，应为 {DATE_FIELD}")
         return
-    if payload.get("date_format") != "YYYY-MM-DD":
-        report.error(f"元数据 date_format 不统一: {metadata_path}")
+    if payload.get("date_format") != DATE_FORMAT:
+        report.error(f"元数据 date_format 不统一: {metadata_path}，应为 {DATE_FORMAT}")
         return
     if not isinstance(payload.get("source_files"), list) or not payload["source_files"]:
         report.error(f"元数据 source_files 不能为空: {metadata_path}")
+        return
+    if payload.get("demo_only") is True and not allow_demo_only:
+        report.error(f"正式数据目录不能混入 demo_only=true 的演示数据: {metadata_path}")
         return
 
     report.ok(f"元数据说明完整: {metadata_path.name}")
@@ -245,11 +316,14 @@ def _check_csv_date(report: ValidationReport, path: Path) -> None:
             if DATE_FIELD not in fields:
                 report.error(f"CSV 缺少统一时间字段 {DATE_FIELD}: {path}")
                 return
-            first_row = next(reader, None)
-            if first_row is None:
+            row_count = 0
+            for row_index, row in enumerate(reader, start=2):
+                row_count += 1
+                _parse_date(report, str(row.get(DATE_FIELD, "")), f"{path.name}:第{row_index}行")
+            if row_count == 0:
                 report.warn(f"CSV 无数据行: {path}")
             else:
-                report.ok(f"CSV 时间字段 {DATE_FIELD}: {path.name}")
+                report.ok(f"CSV 日期字段 {DATE_FIELD} 格式和时段有效: {path.name} ({row_count} 行)")
     except Exception as exc:
         report.error(f"CSV 无法读取: {path} ({exc})")
 
@@ -286,6 +360,8 @@ def _module_code_for_output(relative_output: str) -> str | None:
 
 def validate(root: Path) -> ValidationReport:
     report = ValidationReport()
+    root = root.expanduser().resolve()
+    allow_demo_only = _is_sample_root(root)
     _require_dir(report, root, "孪生数据根目录")
 
     baseline = root / "baseline"
@@ -310,18 +386,19 @@ def validate(root: Path) -> ValidationReport:
     if dem.exists():
         bounds = _check_tif_crs(report, dem)
         _check_bounds_within_watershed(report, dem, bounds, watershed_bounds)
-        _check_metadata_sidecar(report, dem)
+        _check_metadata_sidecar(report, dem, allow_demo_only=allow_demo_only)
 
     for period_dir_name, files in REQUIRED_RAW_PERIOD_FILES.items():
         period_dir = raw / period_dir_name
         _require_dir(report, period_dir, f"raw/{period_dir_name}")
+        _check_period_token(report, period_dir_name.split("_", 1)[0], f"raw/{period_dir_name}")
         for name in files:
             path = period_dir / name
             _require_file(report, path, f"raw/{period_dir_name}/{name}")
             if path.suffix.lower() == ".tif" and path.exists():
                 bounds = _check_tif_crs(report, path)
                 _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
-                _check_metadata_sidecar(report, path)
+                _check_metadata_sidecar(report, path, allow_demo_only=allow_demo_only)
             if path.suffix.lower() == ".csv" and path.exists():
                 _check_csv_date(report, path)
 
@@ -338,6 +415,7 @@ def validate(root: Path) -> ValidationReport:
             _check_finish_tag(report, tag_path)
 
         period_token = period_dir.name.split("_", 1)[0]
+        _check_period_token(report, period_token, rel)
         for output in _expected_outputs_for_period(period_token):
             path = period_dir / output
             _require_file(report, path, f"{rel}/{output}")
@@ -345,12 +423,27 @@ def validate(root: Path) -> ValidationReport:
             if path.suffix.lower() == ".tif" and path.exists():
                 bounds = _check_tif_crs(report, path)
                 _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
-                _check_metadata_sidecar(report, path, module_code=module_code)
+                _check_metadata_sidecar(
+                    report,
+                    path,
+                    module_code=module_code,
+                    allow_demo_only=allow_demo_only,
+                )
             if path.suffix.lower() == ".csv" and path.exists():
                 _check_csv_date(report, path)
-                _check_metadata_sidecar(report, path, module_code=module_code)
+                _check_metadata_sidecar(
+                    report,
+                    path,
+                    module_code=module_code,
+                    allow_demo_only=allow_demo_only,
+                )
             if path.suffix.lower() == ".xlsx" and path.exists():
-                _check_metadata_sidecar(report, path, module_code=module_code)
+                _check_metadata_sidecar(
+                    report,
+                    path,
+                    module_code=module_code,
+                    allow_demo_only=allow_demo_only,
+                )
 
     return report
 
