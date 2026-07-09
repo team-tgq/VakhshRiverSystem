@@ -162,6 +162,34 @@ M05 视频流速监测     → 实测流速数据 → 校准 M03
 - 栅格必须使用 `EPSG:32642`，并裁剪到 `baseline/流域边界.shp`。
 - 每个输出文件建议调用 `app.digital_twin_standard.write_metadata_sidecar()` 写入旁路元数据。
 - 每个方案时段完成后调用 `app.digital_twin_standard.write_finish_tag()` 写入完成标记。
+- 模块插件应优先调用 `app.digital_twin_standard.module_output_path()`、`write_standard_csv()` 和 `mark_module_complete()`，避免各模块自行拼接目录导致成果无法互通。
+
+标准成果写入示例：
+
+```python
+from app.digital_twin_standard import (
+    infer_run_context_from_path,
+    mark_module_complete,
+    module_output_path,
+    period_to_date,
+    write_metadata_sidecar,
+    write_standard_csv,
+)
+
+context = infer_run_context_from_path(input_file)
+output_csv = module_output_path("M05", context=context)
+write_standard_csv(
+    output_csv,
+    fieldnames=["date", "period", "module_code", "velocity_m_s"],
+    rows=[{"date": period_to_date(context.period), "period": context.period, "module_code": "M05", "velocity_m_s": 1.23}],
+)
+write_metadata_sidecar(output_csv, module_code="M05", field="velocity", source_files=[input_file])
+mark_module_complete(context, "M05")
+```
+
+当前已完成标准成果自动导出的插件：
+
+- `M05 RAFT 光流测速`：自动写入 `table/{period}_实测_流速数据.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`method`、`velocity_m_s`、`mean_flow_direction_deg`、`fps`、`frame_count`、`valid_pairs`。
 
 ## 8. 数据目录校验
 

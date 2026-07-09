@@ -242,6 +242,33 @@ $env:VAKHSH_TWIN_DATA_ROOT = "D:/path/to/瓦赫什流域孪生数据"
 python main.py
 ```
 
+模块负责人更新插件时，建议直接复用公共标准工具，不要在插件里手写 `processed` 路径：
+
+```python
+from app.digital_twin_standard import (
+    infer_run_context_from_path,
+    mark_module_complete,
+    module_output_path,
+    period_to_date,
+    write_metadata_sidecar,
+    write_standard_csv,
+)
+
+context = infer_run_context_from_path(input_file)
+output_csv = module_output_path("M05", context=context)
+write_standard_csv(
+    output_csv,
+    fieldnames=["date", "period", "module_code", "velocity_m_s"],
+    rows=[{"date": period_to_date(context.period), "period": context.period, "module_code": "M05", "velocity_m_s": 1.23}],
+)
+write_metadata_sidecar(output_csv, module_code="M05", field="velocity", source_files=[input_file])
+mark_module_complete(context, "M05")
+```
+
+当前已接入标准成果自动导出的模块：
+
+- `M05 RAFT光流测速`：测速完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_实测_流速数据.csv`，并同步写入 `.meta.json` 与 `finish.tag`。
+
 ## 0 数据整理与流程总览
 
 - 插件目录：`plugins/integration_overview_plugin/`
@@ -332,6 +359,7 @@ python main.py
 - 默认权重：`algorithms/raft/raft-sintel.pth`
 - 功能：输入河道视频，基于 RAFT 密集光流估算表面流速，输出流速、有效帧对、光流可视化和流向角度统计
 - 标准输出：`实测_流速数据.csv`
+- 标准接入：完成测速后自动导出 `date/period/scheme/module_code/method/velocity_m_s/fps/frame_count/valid_pairs` 等字段到统一 `processed` 目录
 - 说明：原水文监测模块中的光流测速能力已拆分到本插件；权重文件不再放在项目根目录
 
 ## 当前禁用模块
