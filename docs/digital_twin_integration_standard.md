@@ -212,11 +212,12 @@ mark_module_complete(context, "M05")
 python tools/prepare_real_twin_data.py --resolution-m 1000
 python tools/prepare_real_twin_data.py --local-raw-root "D:/path/to/已有真实raw" --fallback-year 2017
 python tools/validate_twin_data.py --stage baseline-raw
+python tools/run_real_twin_pipeline.py
 python tools/validate_twin_data.py --stage full
 python tools/validate_twin_data.py "D:/path/to/瓦赫什流域孪生数据"
 ```
 
-`prepare_real_twin_data.py` 会优先使用本地真实 `raw`，本地缺失时再下载研究期内可追溯公开数据。`baseline-raw` 阶段只校验基础数据和原始观测数据；`full` 阶段要求各模块已经写入真实 `processed` 成果、旁路元数据和 `finish.tag`。
+`prepare_real_twin_data.py` 会优先使用本地真实 `raw`，本地缺失时再下载研究期内可追溯公开数据。`run_real_twin_pipeline.py` 会统一扫描 `raw/{YYYYMM_时段}`，为常规调度和优化分水两个工况生成 M01、M06、M02、M03、M09、M08、M04、M07、M05 标准成果、旁路元数据和 `finish.tag`；若缺少真实河道视频，M05 只写入 `data_status=not_available` 的流速表，不伪造流速。`baseline-raw` 阶段只校验基础数据和原始观测数据；`full` 阶段要求各模块已经写入真实 `processed` 成果、旁路元数据和 `finish.tag`。
 
 主程序也提供了界面校验入口：
 

@@ -503,7 +503,7 @@ def validate(root: Path, *, stage: str = "baseline-raw") -> ValidationReport:
                 module_code = _module_code_for_output(output)
                 if path.suffix.lower() == ".tif" and path.exists():
                     bounds = _check_tif_crs(report, path)
-                    _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
+                    _check_bounds_cover_watershed(report, path, bounds, watershed_bounds)
                     _check_metadata_sidecar(
                         report,
                         path,

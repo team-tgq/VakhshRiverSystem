@@ -467,7 +467,7 @@ def _download_sentinel(period: str, cfg: dict, root: Path, basin_utm: gpd.GeoDat
     s2_path = raw_dir / f"{period}_哨兵影像.tif"
     s2_info = _merge_planetary_assets(
         s2_items,
-        ["B04", "B03", "B02"],
+        ["B02", "B03", "B04", "B08", "B11"],
         s2_path,
         target_bounds=target_bounds,
         resolution_m=resolution_m,

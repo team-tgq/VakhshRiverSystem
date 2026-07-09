@@ -220,6 +220,7 @@ docs/digital_twin_integration_standard.md
 data/瓦赫什流域孪生数据/        # 正式真实数据目录，本地生成，不进入 Git
 sample_data/瓦赫什流域孪生数据/
 tools/prepare_real_twin_data.py
+tools/run_real_twin_pipeline.py
 tools/validate_twin_data.py
 ```
 
@@ -234,6 +235,14 @@ python tools/prepare_real_twin_data.py --local-raw-root "D:/path/to/已有真实
 
 该脚本会生成 `data/瓦赫什流域孪生数据`。数据选择原则是：优先扫描并接入本地已有真实 `raw/{YYYYMM_时段}`；本地没有标准 raw 时，再在 2005-2017 研究期内选择可下载公开数据补齐。
 
+把真实 `raw` 统一调度成各模块标准 `processed` 成果：
+
+```bash
+python tools/run_real_twin_pipeline.py
+```
+
+该脚本会扫描 `raw/{YYYYMM_时段}`，分别生成 `scheme01_常规调度工况` 和 `scheme02_优化分水工况` 下的 M01、M06、M02、M03、M09、M08、M04、M07、M05 标准成果、`.meta.json` 溯源文件和 `finish.tag`。若 `raw` 中没有真实河道视频，M05 只会写入 `data_status=not_available` 的流速表，表示该时段缺少实测视频来源，不会伪造流速。
+
 当前已接入的真实基础数据：
 
 - `baseline/流域边界.shp`、`baseline/DEM.tif`：来自本机 `E:/PycharmProject/Experiment/Data/瓦赫什河`，统一重投影到 `EPSG:32642`。
@@ -247,6 +256,7 @@ python tools/prepare_real_twin_data.py --local-raw-root "D:/path/to/已有真实
 
 ```bash
 python tools/validate_twin_data.py --stage baseline-raw
+python tools/run_real_twin_pipeline.py
 python tools/validate_twin_data.py --stage full
 python tools/validate_twin_data.py "D:/path/to/瓦赫什流域孪生数据"
 ```
