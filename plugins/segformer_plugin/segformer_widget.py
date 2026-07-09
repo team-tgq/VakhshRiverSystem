@@ -1,4 +1,8 @@
+from __future__ import annotations
+
 import os
+import traceback
+from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -6,10 +10,173 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import Qt
+import numpy as np
+import rasterio
+import rasterio.warp
+from rasterio.enums import Resampling
 
 from algorithms.segformer_service.service_config import TASKS
 from algorithms.segformer_service.service_runner import run_segformer_service
+from app.digital_twin_standard import (
+    TARGET_CRS,
+    default_run_context,
+    mark_module_complete,
+    module_output_path,
+    period_to_date,
+    write_metadata_sidecar,
+    write_standard_csv,
+)
 from app.ui_hints import attach_hint, label_with_hint
+
+
+DEFAULT_SNOW_DEPTH_M = 0.10
+
+
+def _context_from_output_path(path: str | Path):
+    token = Path(path).stem.split("_", 1)[0]
+    if not token.isdigit() or len(token) < 6:
+        token = "200503"
+    period = token[:8] if len(token) >= 8 else token[:6]
+    month = int(period[4:6]) if len(period) >= 6 else 3
+    if 3 <= month <= 5:
+        period_name = "融雪模拟"
+    elif 6 <= month <= 9:
+        period_name = "汛期模拟"
+    else:
+        period_name = "遥感解译"
+    return default_run_context(period=period, period_name=period_name)
+
+
+def _read_snow_cover_as_target(src_path: str | Path):
+    path = Path(src_path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    with rasterio.open(path) as src:
+        if src.count < 1:
+            raise ValueError(f"GeoTIFF 至少需要 1 个积雪覆盖波段: {path}")
+        if src.crs is None:
+            raise ValueError(f"积雪覆盖 GeoTIFF 缺少 CRS，不能写入标准成果: {path}")
+
+        if src.crs.to_string() == TARGET_CRS:
+            data = src.read(1)
+            transform = src.transform
+            width = src.width
+            height = src.height
+        else:
+            transform, width, height = rasterio.warp.calculate_default_transform(
+                src.crs,
+                TARGET_CRS,
+                src.width,
+                src.height,
+                *src.bounds,
+            )
+            data = np.zeros((height, width), dtype=np.float32)
+            rasterio.warp.reproject(
+                source=rasterio.band(src, 1),
+                destination=data,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=transform,
+                dst_crs=TARGET_CRS,
+                resampling=Resampling.nearest,
+                src_nodata=src.nodata,
+                dst_nodata=0,
+            )
+
+        nodata = src.nodata
+        source_crs = src.crs.to_string()
+        band_count = src.count
+
+    data = np.asarray(data)
+    if nodata is not None and np.isfinite(nodata):
+        valid = data != nodata
+    else:
+        valid = np.isfinite(data)
+    snow_cover = np.where(valid & (data > 0), 1, 0).astype(np.uint8)
+    return snow_cover, transform, width, height, source_crs, band_count
+
+
+def _write_snow_cover_tif(snow_cover: np.ndarray, transform, width: int, height: int, dst_path: str | Path) -> Path:
+    dst_path = Path(dst_path)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "dtype": "uint8",
+        "crs": TARGET_CRS,
+        "transform": transform,
+        "compress": "lzw",
+    }
+    with rasterio.open(dst_path, "w", **profile) as dst:
+        dst.write(snow_cover.astype(np.uint8), 1)
+    return dst_path
+
+
+def _write_snow_depth_proxy_tif(
+    snow_cover: np.ndarray,
+    transform,
+    width: int,
+    height: int,
+    dst_path: str | Path,
+) -> Path:
+    dst_path = Path(dst_path)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    snow_depth = np.where(snow_cover > 0, DEFAULT_SNOW_DEPTH_M, 0.0).astype(np.float32)
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": 1,
+        "dtype": "float32",
+        "crs": TARGET_CRS,
+        "transform": transform,
+        "compress": "lzw",
+    }
+    with rasterio.open(dst_path, "w", **profile) as dst:
+        dst.write(snow_depth, 1)
+    return dst_path
+
+
+def _write_snow_area_table(snow_cover: np.ndarray, transform, context, dst_path: str | Path) -> Path:
+    total_pixels = int(snow_cover.size)
+    snow_pixels = int(np.count_nonzero(snow_cover > 0))
+    pixel_area_km2 = abs(float(transform.a) * float(transform.e)) / 1_000_000.0
+    snow_area_km2 = snow_pixels * pixel_area_km2
+    snow_cover_ratio = snow_pixels / total_pixels if total_pixels else 0.0
+    return write_standard_csv(
+        dst_path,
+        fieldnames=[
+            "date",
+            "period",
+            "period_name",
+            "scheme",
+            "scheme_name",
+            "module_code",
+            "snow_cover_area_km2",
+            "snow_cover_ratio",
+            "snow_pixels",
+            "total_pixels",
+            "pixel_area_km2",
+        ],
+        rows=[
+            {
+                "date": period_to_date(context.period),
+                "period": context.period,
+                "period_name": context.period_name,
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "module_code": "M01",
+                "snow_cover_area_km2": f"{snow_area_km2:.6f}",
+                "snow_cover_ratio": f"{snow_cover_ratio:.6f}",
+                "snow_pixels": snow_pixels,
+                "total_pixels": total_pixels,
+                "pixel_area_km2": f"{pixel_area_km2:.9f}",
+            }
+        ],
+    )
 
 
 class ImageLabel(QLabel):
@@ -94,10 +261,13 @@ class SegFormerWidget(QWidget):
         btn_row = QHBoxLayout()
         self.run_btn = QPushButton("运行分割")
         self.load_btn = QPushButton("加载已有结果")
+        self.sync_btn = QPushButton("同步积雪标准成果")
         self.run_btn.clicked.connect(self.run_task)
         self.load_btn.clicked.connect(self.load_existing_result)
+        self.sync_btn.clicked.connect(self.sync_standard_snow_outputs)
         btn_row.addWidget(self.run_btn)
         btn_row.addWidget(self.load_btn)
+        btn_row.addWidget(self.sync_btn)
         layout.addLayout(btn_row)
 
         img_row = QHBoxLayout()
@@ -174,6 +344,10 @@ class SegFormerWidget(QWidget):
             self.result_path = result["overlay_path"]
             self.result_label.set_image(self.result_path)
             self.log.append(f"结果图: {self.result_path}")
+            self.log.append(
+                "提示: png/jpg 结果仅用于预览。若要进入 M01 标准成果链路，"
+                "请点击“同步积雪标准成果”并选择已配准的积雪覆盖 GeoTIFF。"
+            )
 
         except Exception as e:
             self.log.append(f"[ERROR] {str(e)}")
@@ -191,3 +365,89 @@ class SegFormerWidget(QWidget):
             self.result_path = file_path
             self.result_label.set_image(file_path)
             self.log.append(f"已加载结果: {file_path}")
+
+    def sync_standard_snow_outputs(self):
+        geotiff_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 M01 积雪覆盖 GeoTIFF",
+            "",
+            "GeoTIFF (*.tif *.tiff);;All files (*.*)",
+        )
+        if not geotiff_path:
+            return
+
+        try:
+            outputs = self._export_standard_snow_result(geotiff_path)
+            self.log.append("M01 积雪标准成果已同步。")
+            self.log.append(f"积雪覆盖: {outputs['snow_cover']}")
+            self.log.append(f"积雪深度: {outputs['snow_depth']}")
+            self.log.append(f"面积统计: {outputs['area_table']}")
+            QMessageBox.information(self, "同步完成", "已写入 M01 标准成果目录。")
+        except Exception as exc:
+            self.log.append(f"[ERROR] {exc}")
+            self.log.append(traceback.format_exc())
+            QMessageBox.critical(self, "同步失败", str(exc))
+
+    def _export_standard_snow_result(self, geotiff_path: str | Path) -> dict[str, Path]:
+        context = _context_from_output_path(geotiff_path)
+        snow_depth_tif = module_output_path("M01", context=context, output_index=0)
+        snow_cover_tif = module_output_path("M01", context=context, output_index=1)
+        area_table = module_output_path("M01", context=context, output_index=2)
+
+        snow_cover, transform, width, height, source_crs, band_count = _read_snow_cover_as_target(geotiff_path)
+        _write_snow_cover_tif(snow_cover, transform, width, height, snow_cover_tif)
+        _write_snow_depth_proxy_tif(snow_cover, transform, width, height, snow_depth_tif)
+        _write_snow_area_table(snow_cover, transform, context, area_table)
+
+        source_files = [geotiff_path]
+        common_extra = {
+            "scheme": context.scheme,
+            "scheme_name": context.scheme_name,
+            "period": context.period,
+            "period_name": context.period_name,
+            "source_product": "SegFormer snow-cover GeoTIFF",
+            "source_crs": source_crs,
+            "source_band_count": band_count,
+            "source_note": "普通 png/jpg 推理结果仅作为预览；正式 M01 成果必须来自带 CRS 的已配准积雪覆盖 GeoTIFF。",
+        }
+        write_metadata_sidecar(
+            snow_cover_tif,
+            module_code="M01",
+            field="snow_cover",
+            source_files=source_files,
+            extra={
+                **common_extra,
+                "standard_field": "snow_cover",
+                "class_rule": "source_value > 0 -> snow_cover=1, otherwise 0",
+            },
+        )
+        write_metadata_sidecar(
+            snow_depth_tif,
+            module_code="M01",
+            field="snow_depth",
+            source_files=source_files,
+            extra={
+                **common_extra,
+                "standard_field": "snow_depth",
+                "data_status": "proxy_from_snow_cover",
+                "default_snow_depth_m": DEFAULT_SNOW_DEPTH_M,
+                "proxy_note": "M01 当前仅接入积雪覆盖识别结果；雪深以积雪区默认代理值写入，用于保持 M01->M06/M02 标准接口完整，不能替代实测或模型雪深。",
+            },
+        )
+        write_metadata_sidecar(
+            area_table,
+            module_code="M01",
+            field="snow_cover",
+            source_files=source_files,
+            extra={
+                **common_extra,
+                "standard_field": "snow_cover_area",
+                "output_type": "area_statistics_table",
+            },
+        )
+        mark_module_complete(context, "M01")
+        return {
+            "snow_cover": snow_cover_tif,
+            "snow_depth": snow_depth_tif,
+            "area_table": area_table,
+        }
