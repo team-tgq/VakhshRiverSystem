@@ -192,6 +192,7 @@ mark_module_complete(context, "M05")
 - `M02 雪水当量估算`：更新最新 SWE 或加载已有结果后，自动写入 `raster/{period}_M02_swe_mm.tif` 与 `raster/{period}_M02_runoff_mm.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
 - `M04 SAR/遥感淹没区监测`：输入 GeoTIFF 时自动写入 `raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并写入旁路元数据与 `finish.tag`。普通 png/jpg 因缺少 CRS，只保留界面预览结果，不进入正式 GIS 成果链路。
 - `M05 RAFT 光流测速`：自动写入 `table/{period}_实测_流速数据.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`method`、`velocity_m_s`、`mean_flow_direction_deg`、`fps`、`frame_count`、`valid_pairs`。
+- `M09 库区水量估算`：自动写入 `table/{period}_M09_storage.csv` 与 `table/{period}_M09_outflow.csv`，其中 storage 记录水位/面积/库容，outflow 当前保留标准接口并标记 `data_status=not_available`，等待真实下泄流量来源接入。
 - `M07 洪涝风险评估`：自动写入 `raster/{period}_M07_洪涝风险分区图.tif`，优先采用五级风险等级栅格，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
 - `M08 水资源分配`：自动写入 `table/{period}_M08_分水方案统计表.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`time_scale`、`sector`、`demand_million_m3`、`surface_release_million_m3`、`groundwater_million_m3`、`received_million_m3`、`shortage_million_m3`、`satisfaction_ratio_pct`。
 
@@ -239,5 +240,5 @@ python main.py
 - M01 当前由 SegFormer 专题识别承担，是否需要同时输出水体识别成果进入 M03 或 M07。
 - M06 积雪状态识别当前 GEE 输出 `Snow_State` 与 `Runoff_Probability`，是否需要在标准成果中转换为 `snow_type` 和 `snow_density` 两个文件。
 - M03 洪水演进与 Unity 三维展示之间的数据接口是否只读 `processed/`，还是需要额外三维场景缓存目录。
-- M09 库区水量估算当前已有库容/库水量估算，但尚无可追溯下泄流量 `M09_outflow.csv` 计算逻辑；需要确认出库流量来源、单位和时间步长后再接入 M08。
+- M09 库区水量估算已生成 `M09_outflow.csv` 标准接口文件，但真实下泄流量仍缺少可追溯来源；需要确认出库流量来源、单位和时间步长后替换当前缺测占位。
 - M04/M05 是否只做人工校核，还是要在界面中自动参与参数率定。

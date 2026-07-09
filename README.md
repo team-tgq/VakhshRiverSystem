@@ -270,6 +270,7 @@ mark_module_complete(context, "M05")
 - `M02 雪水当量估算`：更新最新 SWE 或加载已有结果后，自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_M02_swe_mm.tif` 和 `raster/{period}_M02_runoff_mm.tif`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M04 淹没区监测`：输入 GeoTIFF 时自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M05 RAFT光流测速`：测速完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_实测_流速数据.csv`，并同步写入 `.meta.json` 与 `finish.tag`。
+- `M09 库区水量估算`：水位/面积或影像估算完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_M09_storage.csv` 和 `table/{period}_M09_outflow.csv`。当前 `outflow` 为标准接口占位文件，标记 `data_status=not_available`，不作为真实下泄流量使用。
 - `M07 洪涝风险评估`：风险评估完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_M07_洪涝风险分区图.tif`，优先使用五级风险等级栅格，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M08 水资源分配`：NSGA-II 优化完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_M08_分水方案统计表.csv`，字段包含部门需水量、放水量、地下水量、实收水量、缺水量和满足率。
 
@@ -326,6 +327,7 @@ mark_module_complete(context, "M05")
 - 算法目录：`algorithms/reservoir_estimation/`
 - 功能：库区面积估算、水库体积估算、结果 CSV 输出
 - 标准输出：`M09_storage.csv`、`M09_outflow.csv`
+- 标准接入：估算完成后自动写入统一 `processed` 目录；`M09_outflow.csv` 当前仅保留标准接口和缺测标记，真实下泄流量需后续接入观测或调度模型
 
 ## 6 水资源分配
 
@@ -377,7 +379,7 @@ mark_module_complete(context, "M05")
 
 ## 仍需对接确认
 
-- `M09 库区水量估算` 当前真实算法主要输出库容/库水量估算，尚未提供可追溯的下泄流量 `M09_outflow.csv` 计算逻辑；需要与模块负责人或刘老师确认出库流量来源后再接入标准输出。
+- `M09 库区水量估算` 已提供 `M09_storage.csv` 与 `M09_outflow.csv` 标准接口；其中 `M09_outflow.csv` 当前标记为 `data_status=not_available`，仍需与模块负责人或刘老师确认真实出库流量来源后填充。
 
 ---
 
@@ -960,9 +962,10 @@ algorithms/segformer_service/environment.yaml
 
 ## 2 库区水量估算（`plugins/reservoir_estimation_plugin`）
 
-- 水库名称：下拉选择
-- 起始日期：日期格式 `yyyy-MM-dd`，示例 `2022-06-01`
-- 结束日期：日期格式 `yyyy-MM-dd`，示例 `2022-06-07`
+- 水位/面积估算：输入日期、水位 `m` 或水面面积 `km2`
+- 影像面积估算：选择 `tif/tiff/png/jpg/jpeg/bmp`，GeoTIFF 自动读取像元面积，普通图片需要手动输入像元大小 `m`
+- 输出：库容估算文本、库容曲线图、`M09_storage.csv` 与 `M09_outflow.csv`
+- 注意：当前下泄流量文件为标准接口占位，字段中会明确 `data_status=not_available`
 
 ## 3 洪涝灾害风险等级评估（`plugins/flood_plugin`）
 

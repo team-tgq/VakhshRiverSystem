@@ -21,12 +21,41 @@ from PyQt5.QtWidgets import (
 )
 
 from algorithms.reservoir_estimation.reservoir_core import NurekReservoirEstimator, save_curve_plot
+from app.digital_twin_standard import (
+    default_run_context,
+    mark_module_complete,
+    module_output_path,
+    period_to_date,
+    write_metadata_sidecar,
+    write_standard_csv,
+)
 from app.ui_hints import attach_hint
 
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = PLUGIN_DIR.parent.parent / "algorithms" / "reservoir_estimation" / "output" / "Nurek"
 PLOT_PATH = OUTPUT_DIR / "last_estimate_plot.png"
+
+
+def _context_from_result_date(date_text: str | None):
+    text = str(date_text or "").strip()
+    if len(text) >= 7 and text[4] == "-":
+        period = text[:7].replace("-", "")
+        month = int(text[5:7])
+    elif len(text) >= 6 and text[:6].isdigit():
+        period = text[:6]
+        month = int(period[4:6])
+    else:
+        period = "200503"
+        month = 3
+
+    if 3 <= month <= 5:
+        period_name = "融雪模拟"
+    elif 6 <= month <= 9:
+        period_name = "汛期模拟"
+    else:
+        period_name = "水库调度"
+    return default_run_context(period=period, period_name=period_name)
 
 
 class ReservoirEstimationWidget(QWidget):
@@ -167,6 +196,12 @@ class ReservoirEstimationWidget(QWidget):
             result = self.estimator.estimate_manual(date=date, water_level_m=level, area_km2=area)
             self.manual_result.setPlainText(result.summary_text())
             self.show_plot(result, self.manual_plot)
+            standard_outputs = self._export_standard_result(result, source_files=[])
+            self.manual_result.append(
+                "\n标准成果已同步:\n"
+                f"- {standard_outputs['storage'].name}\n"
+                f"- {standard_outputs['outflow'].name}"
+            )
         except Exception as exc:
             QMessageBox.critical(self, "估算失败", str(exc))
 
@@ -196,12 +231,141 @@ class ReservoirEstimationWidget(QWidget):
             ]
             self.image_result.setPlainText("\n".join(lines))
             self.show_plot(estimate, self.image_plot)
+            standard_outputs = self._export_standard_result(estimate, source_files=[self.image_path])
+            self.image_result.append(
+                "\n标准成果已同步:\n"
+                f"- {standard_outputs['storage'].name}\n"
+                f"- {standard_outputs['outflow'].name}"
+            )
         except Exception as exc:
             QMessageBox.critical(self, "影像估算失败", str(exc))
 
     def show_plot(self, result, label: "PlotLabel"):
         save_curve_plot(result, PLOT_PATH)
         label.set_plot(PLOT_PATH)
+
+    def _export_standard_result(self, result, *, source_files: list[Path]) -> dict[str, Path]:
+        context = _context_from_result_date(result.date)
+        storage_csv = module_output_path("M09", context=context, output_index=0)
+        outflow_csv = module_output_path("M09", context=context, output_index=1)
+        source_items = [Path(__file__).resolve(), OUTPUT_DIR / "reservoir_hypsometry.csv", *source_files]
+
+        storage_million_m3 = float(result.estimated_volume_mcm)
+        storage_rows = [
+            {
+                "date": result.date or period_to_date(context.period),
+                "period": context.period,
+                "period_name": context.period_name,
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "module_code": "M09",
+                "reservoir_name": "Nurek",
+                "input_type": result.input_type,
+                "water_level_m": result.water_level_m,
+                "area_km2": result.area_km2,
+                "storage_million_m3": storage_million_m3,
+                "storage_10k_m3": storage_million_m3 * 100.0,
+                "storage_km3": result.estimated_volume_km3,
+                "total_capacity_percent": result.total_capacity_percent,
+                "active_storage_percent": result.active_storage_percent,
+                "method": result.method,
+                "warning": "; ".join(result.warnings),
+            }
+        ]
+        write_standard_csv(
+            storage_csv,
+            fieldnames=[
+                "date",
+                "period",
+                "period_name",
+                "scheme",
+                "scheme_name",
+                "module_code",
+                "reservoir_name",
+                "input_type",
+                "water_level_m",
+                "area_km2",
+                "storage_million_m3",
+                "storage_10k_m3",
+                "storage_km3",
+                "total_capacity_percent",
+                "active_storage_percent",
+                "method",
+                "warning",
+            ],
+            rows=storage_rows,
+        )
+
+        outflow_rows = [
+            {
+                "date": result.date or period_to_date(context.period),
+                "period": context.period,
+                "period_name": context.period_name,
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "module_code": "M09",
+                "reservoir_name": "Nurek",
+                "outflow_m3_s": "",
+                "estimated": "false",
+                "data_status": "not_available",
+                "source_storage_million_m3": storage_million_m3,
+                "note": "当前 M09 算法仅估算库容，尚未接入下泄流量观测或调度模型。",
+            }
+        ]
+        write_standard_csv(
+            outflow_csv,
+            fieldnames=[
+                "date",
+                "period",
+                "period_name",
+                "scheme",
+                "scheme_name",
+                "module_code",
+                "reservoir_name",
+                "outflow_m3_s",
+                "estimated",
+                "data_status",
+                "source_storage_million_m3",
+                "note",
+            ],
+            rows=outflow_rows,
+        )
+
+        write_metadata_sidecar(
+            storage_csv,
+            module_code="M09",
+            field="storage",
+            source_files=source_items,
+            extra={
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "period": context.period,
+                "period_name": context.period_name,
+                "reservoir_name": "Nurek",
+                "storage_unit_columns": {
+                    "storage_million_m3": "百万m3",
+                    "storage_10k_m3": "万m3",
+                    "storage_km3": "km3",
+                },
+            },
+        )
+        write_metadata_sidecar(
+            outflow_csv,
+            module_code="M09",
+            field="outflow",
+            source_files=[storage_csv],
+            extra={
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "period": context.period,
+                "period_name": context.period_name,
+                "reservoir_name": "Nurek",
+                "data_status": "not_available",
+                "note": "当前版本只保留标准文件接口，真实下泄流量需接入观测或调度模型后写入。",
+            },
+        )
+        mark_module_complete(context, "M09")
+        return {"storage": storage_csv, "outflow": outflow_csv}
 
 
 class PlotLabel(QLabel):
