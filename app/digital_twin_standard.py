@@ -66,7 +66,7 @@ STANDARD_FIELDS = {
     "outflow": {"name": "下泄流量", "unit": "m3/s"},
     "allocation": {"name": "分水量", "unit": "百万m3"},
     "demand": {"name": "需水量", "unit": "百万m3"},
-    "inundation": {"name": "实测淹没范围", "unit": "0/1"},
+    "inundation": {"name": "淹没范围", "unit": "0/1"},
     "inundated_area": {"name": "淹没面积", "unit": "km2"},
     "velocity": {"name": "表面流速", "unit": "m/s"},
     "flow_direction": {"name": "流向角度", "unit": "degree"},

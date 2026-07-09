@@ -269,6 +269,7 @@ mark_module_complete(context, "M05")
 
 - `M06 积雪状态识别`：GEE 双波段 GeoTIFF 下载到本地后，可在模块中点击“同步已下载GeoTIFF”，自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_M06_snow_type.tif` 和 `raster/{period}_M06_snow_density_gcm3.tif`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M02 雪水当量估算`：更新最新 SWE 或加载已有结果后，自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_M02_swe_mm.tif` 和 `raster/{period}_M02_runoff_mm.tif`，并同步写入 `.meta.json` 与 `finish.tag`。
+- `M03 洪水演进与汇流模拟`：选择外部汇流模型生成的流量 CSV、水深 GeoTIFF 和模拟淹没 GeoTIFF 后，自动写入 `table/{period}_M03_discharge.csv`、`raster/{period}_M03_flood_depth_m.tif`、`raster/{period}_M03_inundation.tif`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M04 淹没区监测`：输入 GeoTIFF 时自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M05 RAFT光流测速`：测速完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_实测_流速数据.csv`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M09 库区水量估算`：水位/面积或影像估算完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_M09_storage.csv` 和 `table/{period}_M09_outflow.csv`。当前 `outflow` 为标准接口占位文件，标记 `data_status=not_available`，不作为真实下泄流量使用。
@@ -320,6 +321,7 @@ mark_module_complete(context, "M05")
 - Unity 程序目录：`tjk/`
 - 功能：Qt 提供入口、状态提示和异常提示，Unity 可执行程序负责洪水演进三维场景展示
 - 标准输出：`M03_discharge.csv`、`M03_flood_depth_m.tif`、`M03_inundation.tif`
+- 标准接入：点击“同步洪水演进成果”后，可把外部汇流模型输出的 CSV/GeoTIFF 同步到统一 `processed` 目录；流量字段会规范为 `discharge_m3_s`，水深和淹没栅格会统一到 `EPSG:32642`
 - 说明：旧的 `FloodRouting` 与 `RunoffRouting` 已不作为主程序模块加载
 
 ## 5 库区水量估算
@@ -987,6 +989,7 @@ algorithms/segformer_service/environment.yaml
 ## 5 洪水演进与汇流模拟（`plugins/routing_plugin`）
 
 - 当前入口：点击“启动三维可视化”
+- 标准成果：点击“同步洪水演进成果”，依次选择河道流量 CSV、洪水水深 GeoTIFF、模拟淹没范围 GeoTIFF
 - Unity 文件：默认读取 `tjk/tjk.exe`，同时要求存在 `tjk/tjk_Data/` 与 `tjk/UnityPlayer.dll`
 - 说明：界面不显示可视化程序路径，只展示启动状态和异常日志
 
