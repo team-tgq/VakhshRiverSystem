@@ -1,6 +1,13 @@
 import os
+import zipfile
+from pathlib import Path
+from xml.sax.saxutils import escape
 
 import numpy as np
+import rasterio
+from PIL import Image
+from rasterio.enums import Resampling
+from rasterio.warp import calculate_default_transform, reproject
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QImage, QPixmap
@@ -18,7 +25,79 @@ from PyQt5.QtWidgets import (
 )
 
 from algorithms.inundation_monitoring.predictor import FloodPredictor
+from app.digital_twin_standard import (
+    TARGET_CRS,
+    infer_run_context_from_path,
+    mark_module_complete,
+    module_output_path,
+    period_to_date,
+    write_metadata_sidecar,
+)
 from app.ui_hints import attach_hint, create_hint_badge, label_with_hint
+
+
+def _write_simple_xlsx(path: str | Path, rows: list[list[object]]) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    sheet_rows = []
+    for row_idx, row in enumerate(rows, start=1):
+        cells = []
+        for col_idx, value in enumerate(row, start=1):
+            col = ""
+            index = col_idx
+            while index:
+                index, rem = divmod(index - 1, 26)
+                col = chr(65 + rem) + col
+            ref = f"{col}{row_idx}"
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                cells.append(f'<c r="{ref}"><v>{value}</v></c>')
+            else:
+                text = escape(str(value))
+                cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{text}</t></is></c>')
+        sheet_rows.append(f'<row r="{row_idx}">{"".join(cells)}</row>')
+
+    sheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        f'<sheetData>{"".join(sheet_rows)}</sheetData>'
+        '</worksheet>'
+    )
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            "</Types>",
+        )
+        zf.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+            "</Relationships>",
+        )
+        zf.writestr(
+            "xl/workbook.xml",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+            'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+            '<sheets><sheet name="M04统计" sheetId="1" r:id="rId1"/></sheets>'
+            "</workbook>",
+        )
+        zf.writestr(
+            "xl/_rels/workbook.xml.rels",
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            "</Relationships>",
+        )
+        zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+    return path
 
 
 class ImageLabel(QLabel):
@@ -125,10 +204,132 @@ class InundationMonitoringWidget(QWidget):
             self.log.append(f"淹没占比: {result['water_ratio'] * 100:.2f}%")
             self.log.append(f"掩膜输出: {result['mask_path']}")
             self.log.append(f"叠加图输出: {result['overlay_path']}")
+            try:
+                standard_outputs = self._export_standard_result(result, img_path)
+                self.log.append(f"标准淹没范围: {standard_outputs['inundation_tif']}")
+                self.log.append(f"标准统计报表: {standard_outputs['stats_xlsx']}")
+            except Exception as export_exc:
+                self.log.append(f"[WARN] 标准成果未导出: {export_exc}")
             self.log.append("识别完成\n")
         except Exception as e:
             self.log.append(f"[ERROR] {e}\n")
             QMessageBox.critical(self, "识别失败", str(e))
+
+    def _export_standard_result(self, result: dict, img_path: str) -> dict[str, str]:
+        context = infer_run_context_from_path(img_path)
+        inundation_tif = module_output_path("M04", context=context, output_index=0)
+        stats_xlsx = module_output_path("M04", context=context, output_index=1)
+
+        mask = np.asarray(result["mask"], dtype=np.uint8)
+        with rasterio.open(img_path) as src:
+            if src.crs is None:
+                raise ValueError("输入影像缺少 CRS，不能导出为标准 GeoTIFF。")
+
+            if mask.shape != (src.height, src.width):
+                nearest = getattr(Image, "Resampling", Image).NEAREST
+                mask = np.asarray(
+                    Image.fromarray(mask).resize((src.width, src.height), nearest),
+                    dtype=np.uint8,
+                )
+
+            src_transform = src.transform
+            src_crs = src.crs
+            dst_array = mask
+            dst_transform = src_transform
+            dst_crs = src_crs
+            dst_width = src.width
+            dst_height = src.height
+
+            if src_crs.to_string() != TARGET_CRS:
+                dst_transform, dst_width, dst_height = calculate_default_transform(
+                    src_crs,
+                    TARGET_CRS,
+                    src.width,
+                    src.height,
+                    *src.bounds,
+                )
+                reprojected = np.zeros((dst_height, dst_width), dtype=np.uint8)
+                reproject(
+                    source=mask,
+                    destination=reprojected,
+                    src_transform=src_transform,
+                    src_crs=src_crs,
+                    dst_transform=dst_transform,
+                    dst_crs=TARGET_CRS,
+                    resampling=Resampling.nearest,
+                    src_nodata=0,
+                    dst_nodata=0,
+                )
+                dst_array = reprojected
+                dst_crs = TARGET_CRS
+
+            profile = src.profile.copy()
+
+        inundation_tif.parent.mkdir(parents=True, exist_ok=True)
+        profile.update(
+            driver="GTiff",
+            height=dst_height,
+            width=dst_width,
+            count=1,
+            dtype="uint8",
+            crs=dst_crs,
+            transform=dst_transform,
+            nodata=0,
+            compress="lzw",
+        )
+        with rasterio.open(inundation_tif, "w", **profile) as dst:
+            dst.write(dst_array.astype(np.uint8), 1)
+
+        pixel_area_km2 = abs(float(dst_transform.a) * float(dst_transform.e)) / 1_000_000.0
+        inundated_pixels = int(np.count_nonzero(dst_array))
+        total_pixels = int(dst_array.size)
+        inundated_area_km2 = inundated_pixels * pixel_area_km2
+        rows = [
+            ["date", period_to_date(context.period), ""],
+            ["period", context.period, ""],
+            ["scheme", context.scheme, ""],
+            ["module_code", "M04", ""],
+            ["threshold", float(result.get("threshold", 0.0)), ""],
+            ["inundated_pixels", inundated_pixels, "pixel"],
+            ["total_pixels", total_pixels, "pixel"],
+            ["pixel_area_km2", pixel_area_km2, "km2"],
+            ["inundated_area_km2", inundated_area_km2, "km2"],
+            ["water_ratio_pct", float(result.get("water_ratio", 0.0)) * 100.0, "%"],
+            ["source_image", os.path.abspath(img_path), ""],
+        ]
+        _write_simple_xlsx(stats_xlsx, [["field", "value", "unit"], *rows])
+
+        write_metadata_sidecar(
+            inundation_tif,
+            module_code="M04",
+            field="inundation",
+            source_files=[img_path],
+            extra={
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "period": context.period,
+                "period_name": context.period_name,
+                "threshold": float(result.get("threshold", 0.0)),
+                "water_ratio": float(result.get("water_ratio", 0.0)),
+            },
+        )
+        write_metadata_sidecar(
+            stats_xlsx,
+            module_code="M04",
+            field="inundated_area",
+            source_files=[img_path, inundation_tif],
+            extra={
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "period": context.period,
+                "period_name": context.period_name,
+            },
+        )
+        mark_module_complete(context, "M04")
+        return {
+            "inundation_tif": str(inundation_tif),
+            "stats_xlsx": str(stats_xlsx),
+        }
 
     def open_overlay_file(self):
         self.open_result_file("overlay_path")

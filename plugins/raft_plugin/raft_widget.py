@@ -22,6 +22,14 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
+from app.digital_twin_standard import (
+    infer_run_context_from_path,
+    mark_module_complete,
+    module_output_path,
+    period_to_date,
+    write_metadata_sidecar,
+    write_standard_csv,
+)
 from algorithms.raft.core import DEFAULT_MODEL_PATH, run_raft_analysis, load_raft_model
 
 
@@ -157,6 +165,8 @@ class AnalysisWorker(QThread):
             "lk_old_pts": first_pair_old,
             "lk_new_pts": first_pair_new,
             "fps": video_fps,
+            "frame_count": len(frames),
+            "valid_pairs": len(velocities),
         }
 
     def run(self):
@@ -302,7 +312,9 @@ class RaftWidget(QWidget):
         if not self.video_path:
             QMessageBox.warning(self, "提示", "请先选择视频文件")
             return
-        if not os.path.isfile(self._current_model_path):
+
+        method = self.cmb_method.currentText()
+        if method == "RAFT" and not os.path.isfile(self._current_model_path):
             QMessageBox.critical(
                 self,
                 "模型缺失",
@@ -310,7 +322,6 @@ class RaftWidget(QWidget):
             )
             return
 
-        method = self.cmb_method.currentText()
         start_frame = 2
         total_frames = self.spin_total.value()
         height_m = self.spin_height.value()
@@ -345,6 +356,13 @@ class RaftWidget(QWidget):
         method = results.get("method", "?")
         vel = results.get("velocity", 0)
         self.lbl_status.setText(f"[{method}] 流速测算完毕 {vel:.4f} m/s")
+        try:
+            standard_csv = self._export_standard_result(results)
+            self.lbl_status.setText(f"[{method}] 流速测算完毕 {vel:.4f} m/s；已导出标准CSV")
+            self.lbl_status.setToolTip(str(standard_csv))
+        except Exception as exc:
+            self.lbl_status.setText(f"[{method}] 流速测算完毕 {vel:.4f} m/s；标准CSV导出失败")
+            QMessageBox.warning(self, "标准成果导出失败", str(exc))
 
         # ---- Left chart: flow visualization ----
         ax1 = self.canvas_left.axes
@@ -402,6 +420,68 @@ class RaftWidget(QWidget):
                      ha="center", va="center")
 
         self.canvas_right.draw()
+
+    def _export_standard_result(self, results):
+        context = infer_run_context_from_path(self.video_path)
+        output_path = module_output_path("M05", context=context)
+
+        angles = np.asarray(results.get("all_angles") or [], dtype=float)
+        if angles.size:
+            direction_deg = float(np.degrees(np.angle(np.mean(np.exp(1j * np.radians(angles))))) % 360.0)
+        else:
+            direction_deg = ""
+
+        fieldnames = [
+            "date",
+            "period",
+            "scheme",
+            "module_code",
+            "method",
+            "velocity_m_s",
+            "mean_flow_direction_deg",
+            "fps",
+            "frame_count",
+            "valid_pairs",
+            "angle_sample_count",
+            "video_file",
+            "model_file",
+        ]
+        write_standard_csv(
+            output_path,
+            fieldnames=fieldnames,
+            rows=[
+                {
+                    "date": period_to_date(context.period),
+                    "period": context.period,
+                    "scheme": context.scheme,
+                    "module_code": "M05",
+                    "method": results.get("method", ""),
+                    "velocity_m_s": f"{float(results.get('velocity', 0.0)):.6f}",
+                    "mean_flow_direction_deg": f"{direction_deg:.3f}" if direction_deg != "" else "",
+                    "fps": f"{float(results.get('fps', 0.0)):.3f}",
+                    "frame_count": int(results.get("frame_count", self.spin_total.value()) or 0),
+                    "valid_pairs": int(results.get("valid_pairs", 0) or 0),
+                    "angle_sample_count": int(angles.size),
+                    "video_file": os.path.abspath(self.video_path),
+                    "model_file": self._current_model_path if results.get("method") == "RAFT" else "",
+                }
+            ],
+        )
+        write_metadata_sidecar(
+            output_path,
+            module_code="M05",
+            field="velocity",
+            source_files=[self.video_path],
+            extra={
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "period": context.period,
+                "period_name": context.period_name,
+                "method": results.get("method", ""),
+            },
+        )
+        mark_module_complete(context, "M05")
+        return output_path
 
     def _reenable_controls(self):
         self.btn_upload.setEnabled(True)

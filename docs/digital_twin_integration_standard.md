@@ -162,6 +162,37 @@ M05 视频流速监测     → 实测流速数据 → 校准 M03
 - 栅格必须使用 `EPSG:32642`，并裁剪到 `baseline/流域边界.shp`。
 - 每个输出文件建议调用 `app.digital_twin_standard.write_metadata_sidecar()` 写入旁路元数据。
 - 每个方案时段完成后调用 `app.digital_twin_standard.write_finish_tag()` 写入完成标记。
+- 模块插件应优先调用 `app.digital_twin_standard.module_output_path()`、`write_standard_csv()` 和 `mark_module_complete()`，避免各模块自行拼接目录导致成果无法互通。
+
+标准成果写入示例：
+
+```python
+from app.digital_twin_standard import (
+    infer_run_context_from_path,
+    mark_module_complete,
+    module_output_path,
+    period_to_date,
+    write_metadata_sidecar,
+    write_standard_csv,
+)
+
+context = infer_run_context_from_path(input_file)
+output_csv = module_output_path("M05", context=context)
+write_standard_csv(
+    output_csv,
+    fieldnames=["date", "period", "module_code", "velocity_m_s"],
+    rows=[{"date": period_to_date(context.period), "period": context.period, "module_code": "M05", "velocity_m_s": 1.23}],
+)
+write_metadata_sidecar(output_csv, module_code="M05", field="velocity", source_files=[input_file])
+mark_module_complete(context, "M05")
+```
+
+当前已完成标准成果自动导出的插件：
+
+- `M04 SAR/遥感淹没区监测`：输入 GeoTIFF 时自动写入 `raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并写入旁路元数据与 `finish.tag`。普通 png/jpg 因缺少 CRS，只保留界面预览结果，不进入正式 GIS 成果链路。
+- `M05 RAFT 光流测速`：自动写入 `table/{period}_实测_流速数据.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`method`、`velocity_m_s`、`mean_flow_direction_deg`、`fps`、`frame_count`、`valid_pairs`。
+- `M07 洪涝风险评估`：自动写入 `raster/{period}_M07_洪涝风险分区图.tif`，优先采用五级风险等级栅格，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
+- `M08 水资源分配`：自动写入 `table/{period}_M08_分水方案统计表.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`time_scale`、`sector`、`demand_million_m3`、`surface_release_million_m3`、`groundwater_million_m3`、`received_million_m3`、`shortage_million_m3`、`satisfaction_ratio_pct`。
 
 ## 8. 数据目录校验
 
@@ -207,5 +238,5 @@ python main.py
 - M01 当前由 SegFormer 专题识别承担，是否需要同时输出水体识别成果进入 M03 或 M07。
 - M06 积雪状态识别当前 GEE 输出 `Snow_State` 与 `Runoff_Probability`，是否需要在标准成果中转换为 `snow_type` 和 `snow_density` 两个文件。
 - M03 洪水演进与 Unity 三维展示之间的数据接口是否只读 `processed/`，还是需要额外三维场景缓存目录。
-- M09 库区水量估算与 M08 水资源分配之间，库容单位统一为 `万m3` 是否满足现有算法。
+- M09 库区水量估算当前已有库容/库水量估算，但尚无可追溯下泄流量 `M09_outflow.csv` 计算逻辑；需要确认出库流量来源、单位和时间步长后再接入 M08。
 - M04/M05 是否只做人工校核，还是要在界面中自动参与参数率定。

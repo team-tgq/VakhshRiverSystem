@@ -242,6 +242,36 @@ $env:VAKHSH_TWIN_DATA_ROOT = "D:/path/to/瓦赫什流域孪生数据"
 python main.py
 ```
 
+模块负责人更新插件时，建议直接复用公共标准工具，不要在插件里手写 `processed` 路径：
+
+```python
+from app.digital_twin_standard import (
+    infer_run_context_from_path,
+    mark_module_complete,
+    module_output_path,
+    period_to_date,
+    write_metadata_sidecar,
+    write_standard_csv,
+)
+
+context = infer_run_context_from_path(input_file)
+output_csv = module_output_path("M05", context=context)
+write_standard_csv(
+    output_csv,
+    fieldnames=["date", "period", "module_code", "velocity_m_s"],
+    rows=[{"date": period_to_date(context.period), "period": context.period, "module_code": "M05", "velocity_m_s": 1.23}],
+)
+write_metadata_sidecar(output_csv, module_code="M05", field="velocity", source_files=[input_file])
+mark_module_complete(context, "M05")
+```
+
+当前已接入标准成果自动导出的模块：
+
+- `M04 淹没区监测`：输入 GeoTIFF 时自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并同步写入 `.meta.json` 与 `finish.tag`。
+- `M05 RAFT光流测速`：测速完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_实测_流速数据.csv`，并同步写入 `.meta.json` 与 `finish.tag`。
+- `M07 洪涝风险评估`：风险评估完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_M07_洪涝风险分区图.tif`，优先使用五级风险等级栅格，并同步写入 `.meta.json` 与 `finish.tag`。
+- `M08 水资源分配`：NSGA-II 优化完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_M08_分水方案统计表.csv`，字段包含部门需水量、放水量、地下水量、实收水量、缺水量和满足率。
+
 ## 0 数据整理与流程总览
 
 - 插件目录：`plugins/integration_overview_plugin/`
@@ -303,6 +333,7 @@ python main.py
 - 功能：努列克坝多时间尺度水资源动态优化配置
 - 标准输入：M09 的 `storage.csv` 与 `outflow.csv`
 - 标准输出：`M08_分水方案统计表.csv`
+- 标准接入：完成 NSGA-II 优化后自动导出统一 `M08_分水方案统计表.csv`、旁路元数据和 `finish.tag`
 - 说明：v2.0 使用 NSGA-II 多目标优化，支持 `daily/monthly/yearly` 时间粒度、生活/生态/农业/工业/下游国家五类部门、LSTM 入库径流预测、下游三国需水估算、ET0 与作物需水计算
 - 可选能力：本地/遥感影像智能估算农业面积；缺少 FTW 依赖或权重时，只影响遥感面积估算，不影响核心配水优化
 
@@ -314,6 +345,7 @@ python main.py
 - 功能：洪涝灾害风险等级识别、GIS 因子分析、风险结果可视化
 - 标准输入：M03 的 `flood_depth.tif`、`inundation.tif`，以及 M04 的实测淹没范围
 - 标准输出：`M07_洪涝风险分区图.tif`
+- 标准接入：运行完成后自动把五级风险等级栅格导出到统一 `processed` 目录；加载已有结果时优先读取标准成果目录
 
 ## 8 淹没区监测
 
@@ -322,6 +354,7 @@ python main.py
 - 算法目录：`algorithms/inundation_monitoring/`
 - 功能：SAR/遥感影像淹没区识别、模型推理、mask 叠加显示
 - 标准输出：`实测_淹没范围.tif`、`淹没面积统计报表.xlsx`
+- 标准接入：GeoTIFF 输入完成识别后自动导出标准淹没范围 GeoTIFF、统计报表、旁路元数据和 `finish.tag`；普通 png/jpg 无 CRS，不作为标准 GIS 成果导出
 - 说明：当前模型结构为 `SegFormerNet`，加载权重时要求 checkpoint 与模型结构一致
 
 ## 9 RAFT 光流测速
@@ -332,12 +365,17 @@ python main.py
 - 默认权重：`algorithms/raft/raft-sintel.pth`
 - 功能：输入河道视频，基于 RAFT 密集光流估算表面流速，输出流速、有效帧对、光流可视化和流向角度统计
 - 标准输出：`实测_流速数据.csv`
+- 标准接入：完成测速后自动导出 `date/period/scheme/module_code/method/velocity_m_s/fps/frame_count/valid_pairs` 等字段到统一 `processed` 目录
 - 说明：原水文监测模块中的光流测速能力已拆分到本插件；权重文件不再放在项目根目录
 
 ## 当前禁用模块
 
 - `plugins/monitoring_plugin/`：旧水文监测模块，已从主程序剔除；光流测速迁移到 `plugins/raft_plugin/`
 - `plugins/warning_plugin/`：洪水智能预警监控模块当前不用，已通过 `enabled=false` 禁用
+
+## 仍需对接确认
+
+- `M09 库区水量估算` 当前真实算法主要输出库容/库水量估算，尚未提供可追溯的下泄流量 `M09_outflow.csv` 计算逻辑；需要与模块负责人或刘老师确认出库流量来源后再接入标准输出。
 
 ---
 
