@@ -189,6 +189,7 @@ mark_module_complete(context, "M05")
 
 当前已完成标准成果自动导出的插件：
 
+- `M01 SegFormer专题识别`：积雪覆盖 GeoTIFF 可同步写入 `raster/{period}_M01_snow_cover.tif`、`raster/{period}_M01_snow_depth_m.tif` 与 `table/{period}_M01_积雪面积统计表.csv`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。普通 png/jpg 推理结果因缺少 CRS，只保留界面预览结果，不进入正式 GIS 成果链路；雪深当前标记为 `proxy_from_snow_cover`，等待真实雪深来源接入。
 - `M06 积雪状态识别`：GEE 双波段 GeoTIFF 下载到本地后，可在插件中同步写入 `raster/{period}_M06_snow_type.tif` 与 `raster/{period}_M06_snow_density_gcm3.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。当前雪密度由 `Snow_State` 类别映射生成，真实雪密度模型确认后可替换。
 - `M02 雪水当量估算`：更新最新 SWE 或加载已有结果后，自动写入 `raster/{period}_M02_swe_mm.tif` 与 `raster/{period}_M02_runoff_mm.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
 - `M03 洪水演进与汇流模拟`：可将外部汇流模型生成的流量 CSV、水深 GeoTIFF 和模拟淹没 GeoTIFF 同步写入 `table/{period}_M03_discharge.csv`、`raster/{period}_M03_flood_depth_m.tif`、`raster/{period}_M03_inundation.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
@@ -239,7 +240,7 @@ python main.py
 
 ## 9. 待刘老师或模块负责人确认事项
 
-- M01 当前由 SegFormer 专题识别承担，是否需要同时输出水体识别成果进入 M03 或 M07。
+- M01 已支持把带 CRS 的积雪覆盖 GeoTIFF 同步为标准积雪覆盖、雪深代理和面积统计成果；是否需要同时把水体识别成果标准化输出给 M03 或 M07，仍需模块负责人确认。
 - M06 积雪状态识别已将 GEE 输出转换为 `snow_type` 和 `snow_density` 两个标准文件；其中雪密度当前为类别映射值，仍需确认是否替换为实测或独立模型雪密度。
 - M03 已支持把外部汇流模型成果同步到 `processed/` 标准目录；Unity 三维展示是否只读该目录，还是需要额外三维场景缓存目录，仍需和模块负责人确认。
 - M09 库区水量估算已生成 `M09_outflow.csv` 标准接口文件，但真实下泄流量仍缺少可追溯来源；需要确认出库流量来源、单位和时间步长后替换当前缺测占位。
