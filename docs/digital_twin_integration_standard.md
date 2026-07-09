@@ -38,7 +38,7 @@
 - 栅格成果：GeoTIFF，扩展名 `.tif`，必须带 CRS 和仿射变换。
 - 水文时序表：CSV，扩展名 `.csv`，时间字段为 `date`。
 - 边界和河网：正式数据使用 Shapefile，样例数据同时保留 `.prj` 文件。
-- 每个模型成果建议同时生成 `*.meta.json` 旁路元数据，记录 CRS、单位、来源模块和来源文件。
+- 每个模型成果必须同时生成 `*.meta.json` 旁路元数据，记录 CRS、单位、来源模块和来源文件。
 - 每个方案时段目录计算完成后写入 `finish.tag`，供 Qt 或三维展示模块监听。
 
 ### 2.4 正式数据与参考数据隔离
@@ -160,7 +160,7 @@ M05 视频流速监测     → 实测流速数据 → 校准 M03
 - 不允许模块直接读取其他模块的临时输出目录；只能读取 `processed/` 中的正式成果。
 - 输出字段必须使用本文档统一字段名和单位。
 - 栅格必须使用 `EPSG:32642`，并裁剪到 `baseline/流域边界.shp`。
-- 每个输出文件建议调用 `app.digital_twin_standard.write_metadata_sidecar()` 写入旁路元数据。
+- 每个输出文件必须调用 `app.digital_twin_standard.write_metadata_sidecar()` 或等价工具写入旁路元数据。
 - 每个方案时段完成后调用 `app.digital_twin_standard.write_finish_tag()` 写入完成标记。
 - 模块插件应优先调用 `app.digital_twin_standard.module_output_path()`、`write_standard_csv()` 和 `mark_module_complete()`，避免各模块自行拼接目录导致成果无法互通。
 
@@ -232,10 +232,12 @@ python main.py
 
 - `baseline/raw/processed` 三类目录是否存在。
 - baseline 是否包含流域边界、河网、水库边界和 DEM。
+- baseline 矢量文件是否为 `EPSG:32642`，河网、水库边界和 DEM 是否位于流域边界范围内。
 - raw 是否包含示例时段的遥感、气象、水库参数和河道视频。
 - processed 是否按“方案 -> 时段 -> raster/table”组织。
-- GeoTIFF 坐标系是否为 `EPSG:32642`。
+- GeoTIFF 坐标系是否为 `EPSG:32642`，范围是否位于流域边界内。
 - CSV 是否包含统一时间字段 `date`。
+- 栅格、表格和报表成果是否有 `.meta.json`，并声明坐标系、时间步长、时间字段、来源文件、模块编号、字段和单位。
 - `finish.tag` 是否可读并包含完成模块列表。
 
 ## 9. 待刘老师或模块负责人确认事项
