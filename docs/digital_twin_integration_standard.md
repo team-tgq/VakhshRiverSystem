@@ -233,8 +233,8 @@ python main.py
 - `baseline/raw/processed` 三类目录是否存在。
 - baseline 是否包含流域边界、河网、水库边界和 DEM。
 - baseline 矢量文件是否为 `EPSG:32642`，河网、水库边界和 DEM 是否位于流域边界范围内。
-- raw 是否包含示例时段的遥感、气象、水库参数和河道视频。
-- processed 是否按“方案 -> 时段 -> raster/table”组织。
+- raw 是否按 `YYYYMM_业务时段` 或 `YYYYMMDD_业务时段` 组织，并检查目录内栅格、表格等文件。
+- processed 是否按“方案 -> 时段 -> raster/table”组织；时段名称动态扫描，不限定仓库样例中的 `200503`、`201707`。
 - GeoTIFF 坐标系是否为 `EPSG:32642`，范围是否位于流域边界内。
 - CSV 是否包含统一时间字段 `date`，日期是否为 `YYYY-MM-DD`，年份是否位于 2005-2017。
 - 栅格、表格和报表成果是否有 `.meta.json`，并声明坐标系、时间步长、时间字段、来源文件、模块编号、字段和单位；字段和单位必须与 `app.digital_twin_standard.STANDARD_FIELDS` 一致。

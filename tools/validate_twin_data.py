@@ -48,27 +48,6 @@ REQUIRED_BASELINE_FILES = (
     "DEM.tif",
 )
 
-REQUIRED_RAW_PERIOD_FILES = {
-    "200503_融雪期": (
-        "200503_哨兵影像.tif",
-        "200503_SAR影像.tif",
-        "200503_逐日气象.csv",
-        "200503_水库参数.csv",
-        "200503_河道视频.mp4",
-    ),
-    "201707_汛期": (
-        "201707_哨兵影像.tif",
-        "201707_逐日气象.csv",
-        "201707_水库参数.csv",
-    ),
-}
-
-REQUIRED_PROCESSED_PERIODS = (
-    "processed/scheme01_常规调度工况/200503_融雪模拟",
-    "processed/scheme01_常规调度工况/201707_汛期模拟",
-    "processed/scheme02_优化分水工况/200503_融雪模拟",
-)
-
 REQUIRED_METADATA_KEYS = (
     "file",
     "module_code",
@@ -246,6 +225,15 @@ def _check_period_token(report: ValidationReport, token: str, label: str) -> Non
         report.ok(f"时段位于统一研究时段: {label}")
 
 
+def _period_token_from_folder(report: ValidationReport, folder: Path, label: str) -> str | None:
+    token = folder.name.split("_", 1)[0]
+    if "_" not in folder.name:
+        report.error(f"{label} 文件夹命名不规范，应为 年月_时段名称: {folder}")
+        return None
+    _check_period_token(report, token, f"{label}/{folder.name}")
+    return token
+
+
 def _check_metadata_sidecar(
     report: ValidationReport,
     path: Path,
@@ -388,13 +376,19 @@ def validate(root: Path) -> ValidationReport:
         _check_bounds_within_watershed(report, dem, bounds, watershed_bounds)
         _check_metadata_sidecar(report, dem, allow_demo_only=allow_demo_only)
 
-    for period_dir_name, files in REQUIRED_RAW_PERIOD_FILES.items():
-        period_dir = raw / period_dir_name
-        _require_dir(report, period_dir, f"raw/{period_dir_name}")
-        _check_period_token(report, period_dir_name.split("_", 1)[0], f"raw/{period_dir_name}")
-        for name in files:
-            path = period_dir / name
-            _require_file(report, path, f"raw/{period_dir_name}/{name}")
+    raw_period_dirs = sorted(path for path in raw.iterdir() if path.is_dir()) if raw.exists() else []
+    if not raw_period_dirs:
+        report.error(f"raw 下缺少按 年月_时段名称 组织的原始数据目录: {raw}")
+    for period_dir in raw_period_dirs:
+        _period_token_from_folder(report, period_dir, "raw")
+        period_files = sorted(path for path in period_dir.iterdir() if path.is_file())
+        if not period_files:
+            report.error(f"raw 时段目录为空: {period_dir}")
+            continue
+        report.ok(f"raw 时段目录包含 {len(period_files)} 个文件: {period_dir.name}")
+        for path in period_files:
+            if path.suffix.lower() in {".meta", ".json"} or path.name.endswith(".meta.json"):
+                continue
             if path.suffix.lower() == ".tif" and path.exists():
                 bounds = _check_tif_crs(report, path)
                 _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
@@ -402,48 +396,59 @@ def validate(root: Path) -> ValidationReport:
             if path.suffix.lower() == ".csv" and path.exists():
                 _check_csv_date(report, path)
 
-    for rel in REQUIRED_PROCESSED_PERIODS:
-        period_dir = root / rel
-        _require_dir(report, period_dir, rel)
-        raster_dir = period_dir / "raster"
-        table_dir = period_dir / "table"
-        _require_dir(report, raster_dir, f"{rel}/raster")
-        _require_dir(report, table_dir, f"{rel}/table")
-        tag_path = period_dir / "finish.tag"
-        _require_file(report, tag_path, f"{rel}/finish.tag")
-        if tag_path.exists():
-            _check_finish_tag(report, tag_path)
+    scheme_dirs = sorted(path for path in processed.iterdir() if path.is_dir()) if processed.exists() else []
+    if not scheme_dirs:
+        report.error(f"processed 下缺少按 方案_工况 组织的模型成果目录: {processed}")
+    for scheme_dir in scheme_dirs:
+        if "_" not in scheme_dir.name:
+            report.error(f"processed 方案目录命名不规范，应为 方案编号_工况名称: {scheme_dir}")
+            continue
+        period_dirs = sorted(path for path in scheme_dir.iterdir() if path.is_dir())
+        if not period_dirs:
+            report.error(f"processed 方案目录下缺少时段成果目录: {scheme_dir}")
+            continue
+        for period_dir in period_dirs:
+            rel = period_dir.relative_to(root).as_posix()
+            period_token = _period_token_from_folder(report, period_dir, "processed")
+            if period_token is None:
+                continue
+            raster_dir = period_dir / "raster"
+            table_dir = period_dir / "table"
+            _require_dir(report, raster_dir, f"{rel}/raster")
+            _require_dir(report, table_dir, f"{rel}/table")
+            tag_path = period_dir / "finish.tag"
+            _require_file(report, tag_path, f"{rel}/finish.tag")
+            if tag_path.exists():
+                _check_finish_tag(report, tag_path)
 
-        period_token = period_dir.name.split("_", 1)[0]
-        _check_period_token(report, period_token, rel)
-        for output in _expected_outputs_for_period(period_token):
-            path = period_dir / output
-            _require_file(report, path, f"{rel}/{output}")
-            module_code = _module_code_for_output(output)
-            if path.suffix.lower() == ".tif" and path.exists():
-                bounds = _check_tif_crs(report, path)
-                _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
-                _check_metadata_sidecar(
-                    report,
-                    path,
-                    module_code=module_code,
-                    allow_demo_only=allow_demo_only,
-                )
-            if path.suffix.lower() == ".csv" and path.exists():
-                _check_csv_date(report, path)
-                _check_metadata_sidecar(
-                    report,
-                    path,
-                    module_code=module_code,
-                    allow_demo_only=allow_demo_only,
-                )
-            if path.suffix.lower() == ".xlsx" and path.exists():
-                _check_metadata_sidecar(
-                    report,
-                    path,
-                    module_code=module_code,
-                    allow_demo_only=allow_demo_only,
-                )
+            for output in _expected_outputs_for_period(period_token):
+                path = period_dir / output
+                _require_file(report, path, f"{rel}/{output}")
+                module_code = _module_code_for_output(output)
+                if path.suffix.lower() == ".tif" and path.exists():
+                    bounds = _check_tif_crs(report, path)
+                    _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
+                    _check_metadata_sidecar(
+                        report,
+                        path,
+                        module_code=module_code,
+                        allow_demo_only=allow_demo_only,
+                    )
+                if path.suffix.lower() == ".csv" and path.exists():
+                    _check_csv_date(report, path)
+                    _check_metadata_sidecar(
+                        report,
+                        path,
+                        module_code=module_code,
+                        allow_demo_only=allow_demo_only,
+                    )
+                if path.suffix.lower() == ".xlsx" and path.exists():
+                    _check_metadata_sidecar(
+                        report,
+                        path,
+                        module_code=module_code,
+                        allow_demo_only=allow_demo_only,
+                    )
 
     return report
 
