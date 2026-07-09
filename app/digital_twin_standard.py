@@ -62,6 +62,8 @@ STANDARD_FIELDS = {
     "discharge": {"name": "河道流量", "unit": "m3/s"},
     "storage": {"name": "库容", "unit": "万m3"},
     "outflow": {"name": "下泄流量", "unit": "m3/s"},
+    "allocation": {"name": "分水量", "unit": "百万m3"},
+    "demand": {"name": "需水量", "unit": "百万m3"},
     "velocity": {"name": "表面流速", "unit": "m/s"},
     "flow_direction": {"name": "流向角度", "unit": "degree"},
 }

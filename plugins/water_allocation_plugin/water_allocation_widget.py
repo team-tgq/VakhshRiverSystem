@@ -25,6 +25,14 @@ from algorithms.water_allocation.core import (
     run_nsga2_opt,
 )
 from algorithms.water_allocation.predict import predict_downstream_total
+from app.digital_twin_standard import (
+    default_run_context,
+    mark_module_complete,
+    module_output_path,
+    period_to_date,
+    write_metadata_sidecar,
+    write_standard_csv,
+)
 
 # 遥感模块为可选依赖
 _HAS_REMOTE_SENSING = False
@@ -40,6 +48,57 @@ except ImportError as e:
     _RS_IMPORT_ERROR = str(e)
 
 _RESOURCE_DIR = Path(__file__).resolve().parent.parent.parent / "algorithms" / "water_allocation" / "resources"
+
+
+def infer_allocation_period_name(month: int, time_scale: str) -> str:
+    if time_scale == "yearly":
+        return "年度分水模拟"
+    if 3 <= int(month) <= 5:
+        return "融雪模拟"
+    if 6 <= int(month) <= 9:
+        return "汛期模拟"
+    return "调度模拟"
+
+
+def build_standard_allocation_rows(result_data, sectors, *, context):
+    D = result_data["D_demand"]
+    loss = float(result_data["loss_rates"][0])
+    X_agg = result_data["X_agg"]
+    output_date = period_to_date(context.period)
+    rows = []
+
+    for j, sector in enumerate(sectors):
+        demand = float(D[0, j])
+        surface_release = float(X_agg[0, 0, j])
+        groundwater = float(X_agg[1, 0, j])
+        received = surface_release * (1.0 - loss) + groundwater
+        shortage = max(0.0, demand - received)
+        ratio = (received / demand * 100.0) if demand > 0 else 100.0
+        rows.append(
+            {
+                "date": output_date,
+                "period": context.period,
+                "period_name": context.period_name,
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "module_code": "M08",
+                "time_scale": result_data.get("time_scale", ""),
+                "sector": sector,
+                "demand_million_m3": f"{demand:.6f}",
+                "surface_release_million_m3": f"{surface_release:.6f}",
+                "groundwater_million_m3": f"{groundwater:.6f}",
+                "received_million_m3": f"{received:.6f}",
+                "shortage_million_m3": f"{shortage:.6f}",
+                "satisfaction_ratio_pct": f"{ratio:.3f}",
+                "loss_rate_pct": f"{loss * 100.0:.3f}",
+                "gini": f"{float(result_data.get('gini', 0.0)):.6f}",
+                "profit_10k_yuan": f"{float(result_data.get('profit', 0.0)):.6f}",
+                "total_supply_million_m3": f"{float(result_data.get('W_supply', [0.0])[0]):.6f}",
+                "n_periods": int(result_data.get("n_periods", 1) or 1),
+            }
+        )
+
+    return rows
 
 try:
     import matplotlib
@@ -164,6 +223,8 @@ class ResultDialog(QDialog):
             f"🌊 水库放水总量: {total_surf:.2f} / {r['W_supply'][0]:.2f} 百万m³",
             f"🔌 水力发电贡献参考值: 约 {total_surf * r['a_hydro']:,.2f} 万元",
         ])
+        if r.get("standard_output_csv"):
+            lines.append(f"📁 标准成果CSV: {r['standard_output_csv']}")
         self._received_data = received_data
         return "\n".join(lines)
 
@@ -1234,6 +1295,10 @@ class WaterAllocationWidget(QWidget):
             # 弹窗显示结果
             result_data = {
                 "time_scale": time_scale,
+                "start_year": start_year,
+                "start_month": start_month,
+                "end_year": end_year,
+                "end_month": end_month,
                 "profit": float(-res.F[best_idx, 0]),
                 "shortage": float(res.F[best_idx, 1]),
                 "gini": float(res.F[best_idx, 2]),
@@ -1246,10 +1311,69 @@ class WaterAllocationWidget(QWidget):
                 "time_series_X": best_X if n_periods > 1 else None,
                 "date_labels": date_labels if n_periods > 1 else None,
             }
+            try:
+                standard_csv = self._export_standard_result(result_data)
+                result_data["standard_output_csv"] = str(standard_csv)
+            except Exception as export_exc:
+                QMessageBox.warning(self, "标准成果导出失败", str(export_exc))
+
             dlg = ResultDialog(result_data, self.sectors, self)
             dlg.exec_()
         except Exception as e:
             QMessageBox.critical(self, "运行错误", str(e))
+
+    def _standard_run_context(self, result_data):
+        start_year = int(result_data.get("start_year") or self.start_year_cb.currentText())
+        start_month = int(result_data.get("start_month") or self.start_month_cb.currentText())
+        period = f"{start_year:04d}{start_month:02d}"
+        period_name = infer_allocation_period_name(start_month, result_data.get("time_scale", "monthly"))
+        return default_run_context(period=period, period_name=period_name)
+
+    def _export_standard_result(self, result_data):
+        context = self._standard_run_context(result_data)
+        output_path = module_output_path("M08", context=context)
+        fieldnames = [
+            "date",
+            "period",
+            "period_name",
+            "scheme",
+            "scheme_name",
+            "module_code",
+            "time_scale",
+            "sector",
+            "demand_million_m3",
+            "surface_release_million_m3",
+            "groundwater_million_m3",
+            "received_million_m3",
+            "shortage_million_m3",
+            "satisfaction_ratio_pct",
+            "loss_rate_pct",
+            "gini",
+            "profit_10k_yuan",
+            "total_supply_million_m3",
+            "n_periods",
+        ]
+        rows = build_standard_allocation_rows(result_data, self.sectors, context=context)
+        write_standard_csv(output_path, fieldnames=fieldnames, rows=rows)
+        write_metadata_sidecar(
+            output_path,
+            module_code="M08",
+            field="allocation",
+            source_files=[
+                module_output_path("M09", context=context, output_index=0),
+                module_output_path("M09", context=context, output_index=1),
+            ],
+            extra={
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "period": context.period,
+                "period_name": context.period_name,
+                "time_scale": result_data.get("time_scale", ""),
+                "sectors": list(self.sectors),
+            },
+        )
+        mark_module_complete(context, "M08")
+        return output_path
 
     def _build_labels(self, sy, sm, ey, em, scale):
         import pandas as pd

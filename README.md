@@ -268,6 +268,7 @@ mark_module_complete(context, "M05")
 当前已接入标准成果自动导出的模块：
 
 - `M05 RAFT光流测速`：测速完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_实测_流速数据.csv`，并同步写入 `.meta.json` 与 `finish.tag`。
+- `M08 水资源分配`：NSGA-II 优化完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_M08_分水方案统计表.csv`，字段包含部门需水量、放水量、地下水量、实收水量、缺水量和满足率。
 
 ## 0 数据整理与流程总览
 
@@ -330,6 +331,7 @@ mark_module_complete(context, "M05")
 - 功能：努列克坝多时间尺度水资源动态优化配置
 - 标准输入：M09 的 `storage.csv` 与 `outflow.csv`
 - 标准输出：`M08_分水方案统计表.csv`
+- 标准接入：完成 NSGA-II 优化后自动导出统一 `M08_分水方案统计表.csv`、旁路元数据和 `finish.tag`
 - 说明：v2.0 使用 NSGA-II 多目标优化，支持 `daily/monthly/yearly` 时间粒度、生活/生态/农业/工业/下游国家五类部门、LSTM 入库径流预测、下游三国需水估算、ET0 与作物需水计算
 - 可选能力：本地/遥感影像智能估算农业面积；缺少 FTW 依赖或权重时，只影响遥感面积估算，不影响核心配水优化
 
@@ -366,6 +368,10 @@ mark_module_complete(context, "M05")
 
 - `plugins/monitoring_plugin/`：旧水文监测模块，已从主程序剔除；光流测速迁移到 `plugins/raft_plugin/`
 - `plugins/warning_plugin/`：洪水智能预警监控模块当前不用，已通过 `enabled=false` 禁用
+
+## 仍需对接确认
+
+- `M09 库区水量估算` 当前真实算法主要输出库容/库水量估算，尚未提供可追溯的下泄流量 `M09_outflow.csv` 计算逻辑；需要与模块负责人或刘老师确认出库流量来源后再接入标准输出。
 
 ---
 
