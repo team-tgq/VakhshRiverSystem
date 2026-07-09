@@ -269,6 +269,7 @@ mark_module_complete(context, "M05")
 
 - `M04 淹没区监测`：输入 GeoTIFF 时自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M05 RAFT光流测速`：测速完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_实测_流速数据.csv`，并同步写入 `.meta.json` 与 `finish.tag`。
+- `M07 洪涝风险评估`：风险评估完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/raster/{period}_M07_洪涝风险分区图.tif`，优先使用五级风险等级栅格，并同步写入 `.meta.json` 与 `finish.tag`。
 - `M08 水资源分配`：NSGA-II 优化完成后自动写入 `processed/{scheme}_{工况}/{period}_{模拟}/table/{period}_M08_分水方案统计表.csv`，字段包含部门需水量、放水量、地下水量、实收水量、缺水量和满足率。
 
 ## 0 数据整理与流程总览
@@ -344,6 +345,7 @@ mark_module_complete(context, "M05")
 - 功能：洪涝灾害风险等级识别、GIS 因子分析、风险结果可视化
 - 标准输入：M03 的 `flood_depth.tif`、`inundation.tif`，以及 M04 的实测淹没范围
 - 标准输出：`M07_洪涝风险分区图.tif`
+- 标准接入：运行完成后自动把五级风险等级栅格导出到统一 `processed` 目录；加载已有结果时优先读取标准成果目录
 
 ## 8 淹没区监测
 

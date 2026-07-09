@@ -59,6 +59,7 @@ STANDARD_FIELDS = {
     "swe": {"name": "雪水当量", "unit": "mm"},
     "runoff": {"name": "径流深度", "unit": "mm"},
     "flood_depth": {"name": "洪水水深", "unit": "m"},
+    "flood_risk": {"name": "洪涝风险等级", "unit": "class"},
     "discharge": {"name": "河道流量", "unit": "m3/s"},
     "storage": {"name": "库容", "unit": "万m3"},
     "outflow": {"name": "下泄流量", "unit": "m3/s"},

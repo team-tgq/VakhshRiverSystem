@@ -1,6 +1,7 @@
 import csv
 import os
 import re
+from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
@@ -8,7 +9,9 @@ import rasterio
 from matplotlib import colors as mcolors
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from rasterio.enums import Resampling
 from rasterio.plot import plotting_extent
+from rasterio.warp import calculate_default_transform, reproject
 
 from PyQt5.QtCore import QDate, QUrl
 from PyQt5.QtWebEngineWidgets import QWebEngineView
@@ -32,7 +35,80 @@ from PyQt5.QtWidgets import (
 )
 
 from algorithms.flood import risk_assessment_6factors_entropy
+from app.digital_twin_standard import (
+    TARGET_CRS,
+    default_run_context,
+    mark_module_complete,
+    module_output_path,
+    period_to_date,
+    write_metadata_sidecar,
+)
 from app.ui_hints import attach_hint, label_with_hint
+
+
+def _target_date_to_context(target_date: str | None):
+    if target_date:
+        token = target_date.replace("-", "")[:6]
+        month = int(token[4:6])
+        if 3 <= month <= 5:
+            period_name = "融雪模拟"
+        elif 6 <= month <= 9:
+            period_name = "汛期模拟"
+        else:
+            period_name = "风险模拟"
+        return default_run_context(period=token, period_name=period_name)
+    return default_run_context()
+
+
+def _copy_or_reproject_raster(src_path: str | Path, dst_path: str | Path) -> Path:
+    src_path = Path(src_path)
+    dst_path = Path(dst_path)
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with rasterio.open(src_path) as src:
+        profile = src.profile.copy()
+        src_crs = src.crs
+        if src_crs is None:
+            raise ValueError(f"风险栅格缺少 CRS，不能写入标准成果: {src_path}")
+
+        if src_crs.to_string() == TARGET_CRS:
+            data = src.read()
+            profile.update(driver="GTiff", compress="lzw")
+            with rasterio.open(dst_path, "w", **profile) as dst:
+                dst.write(data)
+            return dst_path
+
+        transform, width, height = calculate_default_transform(
+            src_crs,
+            TARGET_CRS,
+            src.width,
+            src.height,
+            *src.bounds,
+        )
+        profile.update(
+            driver="GTiff",
+            crs=TARGET_CRS,
+            transform=transform,
+            width=width,
+            height=height,
+            compress="lzw",
+        )
+        destination = np.zeros((src.count, height, width), dtype=src.dtypes[0])
+        for band_index in range(1, src.count + 1):
+            reproject(
+                source=rasterio.band(src, band_index),
+                destination=destination[band_index - 1],
+                src_transform=src.transform,
+                src_crs=src_crs,
+                dst_transform=transform,
+                dst_crs=TARGET_CRS,
+                resampling=Resampling.nearest,
+                src_nodata=src.nodata,
+                dst_nodata=src.nodata,
+            )
+        with rasterio.open(dst_path, "w", **profile) as dst:
+            dst.write(destination)
+    return dst_path
 
 
 class RasterCanvas(FigureCanvas):
@@ -503,6 +579,11 @@ class FloodWidget(QWidget):
                 "土地利用平均风险前3："
                 + self._format_top_landuse(result.get("top_mean_risk_landuse", []), "mean_risk", percentage=False)
             )
+            try:
+                standard_tif = self._export_standard_result(result)
+                self.log.append(f"标准风险分区图: {standard_tif}")
+            except Exception as export_exc:
+                self.log.append(f"[WARN] 标准风险分区图未导出: {export_exc}")
 
             self.display_results()
             self.log.append("洪涝风险评估完成。")
@@ -516,6 +597,13 @@ class FloodWidget(QWidget):
 
     def load_existing_results(self):
         try:
+            standard_result = self._standard_existing_result()
+            if standard_result is not None:
+                self.result_paths = standard_result
+                self.display_results()
+                self.log.append("已加载标准成果目录中的洪涝风险分区图。")
+                return
+
             base_dir = os.path.dirname(risk_assessment_6factors_entropy.__file__)
             risk_tif = os.path.join(base_dir, "outputs", "risk_6factors.tif")
             risk_level_tif = os.path.join(base_dir, "outputs", "risk_6factors_level.tif")
@@ -548,6 +636,65 @@ class FloodWidget(QWidget):
             if detail and detail != user_message:
                 self.log.append(f"详细原因：{detail}")
             self._show_user_error("无法加载结果", user_message)
+
+    def _export_standard_result(self, result):
+        target_date = result.get("resolved_target_date") or result.get("requested_target_date")
+        context = _target_date_to_context(target_date)
+        source_tif = result.get("risk_level_tif") or result.get("risk_tif")
+        if not source_tif or not os.path.exists(source_tif):
+            raise FileNotFoundError(f"风险分区源栅格不存在: {source_tif}")
+
+        output_tif = module_output_path("M07", context=context)
+        _copy_or_reproject_raster(source_tif, output_tif)
+        write_metadata_sidecar(
+            output_tif,
+            module_code="M07",
+            field="flood_risk",
+            source_files=[
+                source_tif,
+                result.get("risk_tif", ""),
+                result.get("rain_path", ""),
+                result.get("soil_path", ""),
+                module_output_path("M04", context=context, output_index=0),
+            ],
+            extra={
+                "scheme": context.scheme,
+                "scheme_name": context.scheme_name,
+                "period": context.period,
+                "period_name": context.period_name,
+                "date": period_to_date(context.period),
+                "requested_target_date": result.get("requested_target_date"),
+                "resolved_target_date": result.get("resolved_target_date"),
+                "risk_level_method": result.get("risk_level_method"),
+            },
+        )
+        mark_module_complete(context, "M07")
+        result["standard_risk_tif"] = str(output_tif)
+        return output_tif
+
+    def _standard_existing_result(self):
+        target_date = self.date_input.date().toString("yyyy-MM-dd")
+        context = _target_date_to_context(target_date)
+        standard_tif = module_output_path("M07", context=context)
+        if not standard_tif.exists():
+            return None
+
+        base_dir = os.path.dirname(risk_assessment_6factors_entropy.__file__)
+        map_html = os.path.join(base_dir, "outputs", "flood_risk_map.html")
+        study_area_shp = os.path.join(base_dir, "study_area.shp")
+        landcover_path = os.path.join(base_dir, "data", "processed", "landcover_demgrid.tif")
+        landuse_stats_csv = os.path.join(base_dir, "outputs", "landuse_risk_stats.csv")
+        landuse_summary_txt = os.path.join(base_dir, "outputs", "landuse_risk_summary.txt")
+
+        return {
+            "risk_tif": str(standard_tif),
+            "risk_level_tif": str(standard_tif),
+            "map_html": map_html,
+            "study_area_shp": study_area_shp,
+            "landcover_path": landcover_path,
+            "landuse_stats_csv": landuse_stats_csv,
+            "landuse_summary_txt": landuse_summary_txt,
+        }
 
     def display_results(self):
         if not self.result_paths:
