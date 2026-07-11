@@ -21,6 +21,8 @@ from app.digital_twin_standard import (
     DEFAULT_PERIOD,
     TARGET_CRS,
     default_run_context,
+    ensure_raw_source_path,
+    infer_run_context_from_path,
     mark_module_complete,
     module_output_path,
     period_to_date,
@@ -244,7 +246,6 @@ class RoutingWidget(QWidget):
         description.setWordWrap(True)
 
         self.run_btn = QPushButton("启动三维可视化")
-        self.sync_btn = QPushButton("同步洪水演进成果")
         self.status_label = QLabel("状态: 未启动")
         self.log = QTextEdit()
         self.log.setReadOnly(True)
@@ -252,12 +253,10 @@ class RoutingWidget(QWidget):
         layout.addWidget(title)
         layout.addWidget(description)
         layout.addWidget(self.run_btn)
-        layout.addWidget(self.sync_btn)
         layout.addWidget(self.status_label)
         layout.addWidget(self.log)
 
         self.run_btn.clicked.connect(self.launch_unity_module)
-        self.sync_btn.clicked.connect(self.sync_standard_outputs)
 
     def launch_unity_module(self):
         try:
@@ -274,24 +273,24 @@ class RoutingWidget(QWidget):
     def sync_standard_outputs(self):
         discharge_csv, _ = QFileDialog.getOpenFileName(
             self,
-            "选择 M03 河道流量 CSV",
-            standard_dialog_dir("output", module_code="M03", output_index=0),
+            "选择 raw 中的 M03 河道流量 CSV",
+            standard_dialog_dir("raw", module_code="M03", output_index=0),
             "CSV files (*.csv);;All files (*.*)",
         )
         if not discharge_csv:
             return
         flood_depth_tif, _ = QFileDialog.getOpenFileName(
             self,
-            "选择 M03 洪水水深 GeoTIFF",
-            standard_dialog_dir("output", module_code="M03", output_index=1),
+            "选择 raw 中的 M03 洪水水深 GeoTIFF",
+            standard_dialog_dir("raw", module_code="M03", output_index=0),
             "GeoTIFF (*.tif *.tiff);;All files (*.*)",
         )
         if not flood_depth_tif:
             return
         inundation_tif, _ = QFileDialog.getOpenFileName(
             self,
-            "选择 M03 模拟淹没范围 GeoTIFF",
-            standard_dialog_dir("output", module_code="M03", output_index=2),
+            "选择 raw 中的 M03 模拟淹没范围 GeoTIFF",
+            standard_dialog_dir("raw", module_code="M03", output_index=0),
             "GeoTIFF (*.tif *.tiff);;All files (*.*)",
         )
         if not inundation_tif:
@@ -317,7 +316,10 @@ class RoutingWidget(QWidget):
         flood_depth_tif: str | Path,
         inundation_tif: str | Path,
     ) -> dict[str, Path]:
-        context = _context_from_output_path(discharge_csv)
+        discharge_csv = ensure_raw_source_path(discharge_csv)
+        flood_depth_tif = ensure_raw_source_path(flood_depth_tif)
+        inundation_tif = ensure_raw_source_path(inundation_tif)
+        context = infer_run_context_from_path(discharge_csv)
         standard_discharge = module_output_path("M03", context=context, output_index=0)
         standard_depth = module_output_path("M03", context=context, output_index=1)
         standard_inundation = module_output_path("M03", context=context, output_index=2)
@@ -327,13 +329,13 @@ class RoutingWidget(QWidget):
         _copy_or_reproject_binary_raster(inundation_tif, standard_inundation)
 
         m02_runoff = module_output_path("M02", context=context, output_index=1)
-        source_files = [m02_runoff, discharge_csv, flood_depth_tif, inundation_tif]
+        source_files = [discharge_csv, flood_depth_tif, inundation_tif]
         common_extra = {
             "scheme": context.scheme,
             "scheme_name": context.scheme_name,
             "period": context.period,
             "period_name": context.period_name,
-            "upstream_runoff": str(m02_runoff),
+            "upstream_outputs": [str(m02_runoff)],
             "source_note": "由外部洪水演进/汇流模型成果同步到统一 processed 目录。",
         }
         write_metadata_sidecar(

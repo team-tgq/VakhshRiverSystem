@@ -8,6 +8,7 @@ All functions are independent of any GUI framework.
 
 import os
 import math
+import csv
 from pathlib import Path
 import numpy as np
 import torch
@@ -276,4 +277,180 @@ def run_raft_analysis(
         "frame_count": len(frames),
         "valid_pairs": len(velocities),
         "summary": f"RAFT 测速完成 {final_vel:.4f} m/s (基于{len(velocities)}个有效帧对)",
+    }
+
+
+def run_raft_video_full(
+    video_path,
+    output_csv,
+    *,
+    visualization_video=None,
+    model_path=None,
+    device=None,
+    max_dimension=640,
+    iters=12,
+    progress_callback=None,
+):
+    """Process every adjacent frame pair and report uncalibrated pixel velocity."""
+    source = Path(video_path)
+    if not source.is_file() or source.stat().st_size == 0:
+        raise FileNotFoundError(source)
+    if max_dimension <= 0:
+        raise ValueError("max_dimension 必须为正数")
+    if iters <= 0:
+        raise ValueError("iters 必须为正数")
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    model_file = Path(model_path or DEFAULT_MODEL_PATH)
+    model, _ = load_raft_model(str(model_file), device)
+
+    capture = cv2.VideoCapture(str(source))
+    if not capture.isOpened():
+        raise ValueError(f"无法打开视频: {source}")
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    if not np.isfinite(fps) or fps <= 0:
+        raise ValueError(f"视频 FPS 无效，不能伪造默认值: {source}")
+    declared_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    original_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    original_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    if original_width <= 0 or original_height <= 0:
+        raise ValueError(f"视频尺寸无效: {source}")
+    scale = min(1.0, float(max_dimension) / max(original_width, original_height))
+    working_width = max(8, int(round(original_width * scale / 8.0)) * 8)
+    working_height = max(8, int(round(original_height * scale / 8.0)) * 8)
+    scale_x = working_width / original_width
+    scale_y = working_height / original_height
+
+    def resize(frame):
+        if frame.shape[1] == working_width and frame.shape[0] == working_height:
+            return frame
+        return cv2.resize(frame, (working_width, working_height), interpolation=cv2.INTER_AREA)
+
+    ok, previous_original = capture.read()
+    if not ok:
+        capture.release()
+        raise ValueError(f"视频没有可读取帧: {source}")
+    previous = resize(previous_original)
+    del previous_original
+
+    output_path = Path(output_csv)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    visualization_path = Path(visualization_video) if visualization_video else None
+    writer = None
+    if visualization_path is not None:
+        visualization_path.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(
+            str(visualization_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (working_width, working_height),
+        )
+        if not writer.isOpened():
+            capture.release()
+            raise RuntimeError(f"无法创建光流可视化视频: {visualization_path}")
+
+    fieldnames = [
+        "frame_index",
+        "next_frame_index",
+        "timestamp_s",
+        "velocity_px_frame",
+        "velocity_m_s",
+        "valid_pixel_count",
+        "confidence",
+        "source_video",
+    ]
+    processed_pairs = 0
+    valid_pairs = 0
+    read_frames = 1
+    pair_pixel_velocities = []
+    direction_sin_sum = 0.0
+    direction_cos_sum = 0.0
+    direction_sample_count = 0
+    try:
+        with output_path.open("w", encoding="utf-8-sig", newline="") as file:
+            csv_writer = csv.DictWriter(file, fieldnames=fieldnames)
+            csv_writer.writeheader()
+            while True:
+                ok, current_original = capture.read()
+                if not ok:
+                    break
+                current = resize(current_original)
+                del current_original
+                frame_index = read_frames - 1
+                next_frame_index = read_frames
+                result = _process_raft_pair(model, previous, current, device=device, iters=iters)
+                row = {
+                    "frame_index": frame_index,
+                    "next_frame_index": next_frame_index,
+                    "timestamp_s": f"{next_frame_index / fps:.6f}",
+                    "velocity_px_frame": "",
+                    "velocity_m_s": "",
+                    "valid_pixel_count": 0,
+                    "confidence": "0.000000",
+                    "source_video": str(source.resolve()),
+                }
+                if result is not None:
+                    # Preserve displacement in source-frame pixels after isotropic downscaling.
+                    original_pixel_velocity = np.sqrt(
+                        (result["flow_u"] / scale_x) ** 2 + (result["flow_v"] / scale_y) ** 2
+                    )
+                    pair_velocity = float(np.median(original_pixel_velocity))
+                    row["velocity_px_frame"] = f"{pair_velocity:.6f}"
+                    row["valid_pixel_count"] = int(result["valid_count"])
+                    row["confidence"] = f"{float(result['valid_count'] / (working_width * working_height)):.6f}"
+                    pair_pixel_velocities.append(pair_velocity)
+                    valid_angles = np.radians(result["valid_angles"])
+                    direction_sin_sum += float(np.sin(valid_angles).sum())
+                    direction_cos_sum += float(np.cos(valid_angles).sum())
+                    direction_sample_count += int(valid_angles.size)
+                    valid_pairs += 1
+                    if writer is not None:
+                        writer.write(cv2.cvtColor(result["flow_rgb"], cv2.COLOR_RGB2BGR))
+                elif writer is not None:
+                    writer.write(np.zeros((working_height, working_width, 3), dtype=np.uint8))
+                csv_writer.writerow(row)
+                processed_pairs += 1
+                read_frames += 1
+                previous = current
+                if progress_callback and (
+                    processed_pairs == 1
+                    or processed_pairs % 25 == 0
+                    or (declared_frames > 0 and read_frames >= declared_frames)
+                ):
+                    progress_callback(processed_pairs, max(declared_frames - 1, processed_pairs))
+    finally:
+        capture.release()
+        if writer is not None:
+            writer.release()
+        del model
+        if device.startswith("cuda"):
+            torch.cuda.empty_cache()
+
+    if processed_pairs == 0:
+        raise RuntimeError("视频不足两帧，未生成任何帧对结果")
+    mean_direction_deg = None
+    if direction_sample_count > 0:
+        mean_direction_deg = float(
+            np.degrees(np.arctan2(direction_sin_sum, direction_cos_sum)) % 360.0
+        )
+    return {
+        "source_video": str(source.resolve()),
+        "output_csv": str(output_path.resolve()),
+        "visualization_video": str(visualization_path.resolve()) if visualization_path else None,
+        "declared_frame_count": declared_frames,
+        "read_frame_count": read_frames,
+        "processed_pair_count": processed_pairs,
+        "valid_pair_count": valid_pairs,
+        "median_velocity_px_frame": (
+            float(np.median(pair_pixel_velocities)) if pair_pixel_velocities else None
+        ),
+        "mean_flow_direction_deg": mean_direction_deg,
+        "direction_sample_count": direction_sample_count,
+        "fps": fps,
+        "original_size": [original_width, original_height],
+        "working_size": [working_width, working_height],
+        "device": device,
+        "model_path": str(model_file.resolve()),
+        "iters": iters,
+        "physical_calibration": False,
+        "velocity_m_s_status": "blank because no verified spatial calibration was provided",
     }

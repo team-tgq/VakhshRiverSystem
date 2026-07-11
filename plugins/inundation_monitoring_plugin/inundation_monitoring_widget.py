@@ -27,14 +27,38 @@ from PyQt5.QtWidgets import (
 from algorithms.inundation_monitoring.predictor import FloodPredictor
 from app.digital_twin_standard import (
     TARGET_CRS,
+    ensure_raw_source_path,
     infer_run_context_from_path,
     mark_module_complete,
     module_output_path,
+    module_processed_dir,
     period_to_date,
+    raw_data_dir,
     standard_dialog_dir,
     write_metadata_sidecar,
 )
 from app.ui_hints import attach_hint, create_hint_badge, label_with_hint
+
+
+def _m04_validation_group(path: str | Path) -> str | None:
+    source = Path(path).resolve()
+    candidates = (
+        (
+            raw_data_dir("remote_sensing", "sentinel1_sar", "inundation_weak_labeled").resolve(),
+            "sentinel1_sar_weak",
+        ),
+        (
+            raw_data_dir("remote_sensing", "sentinel2_multispectral", "inundation_hand_labeled").resolve(),
+            "sentinel2_optical_hand",
+        ),
+    )
+    for base, group in candidates:
+        try:
+            source.relative_to(base)
+            return group
+        except ValueError:
+            continue
+    return None
 
 
 def _write_simple_xlsx(path: str | Path, rows: list[list[object]]) -> Path:
@@ -176,15 +200,23 @@ class InundationMonitoringWidget(QWidget):
         layout.addWidget(self.log)
 
     def select_image(self):
+        validation_dir = raw_data_dir(
+            "remote_sensing", "sentinel2_multispectral", "inundation_hand_labeled"
+        )
+        initial_dir = str(validation_dir if validation_dir.exists() else standard_dialog_dir("raw", module_code="M04"))
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "选择遥感影像",
-            standard_dialog_dir("raw", module_code="M04"),
+            initial_dir,
             "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;All Files (*)",
         )
         if file_path:
-            self.current_image_path = file_path
-            self.run_prediction(file_path)
+            try:
+                file_path = str(ensure_raw_source_path(file_path))
+                self.current_image_path = file_path
+                self.run_prediction(file_path)
+            except Exception as exc:
+                QMessageBox.warning(self, "输入路径错误", str(exc))
 
     def run_prediction(self, img_path: str):
         try:
@@ -195,7 +227,17 @@ class InundationMonitoringWidget(QWidget):
             self.log.append(f"开始 SegFormer 7 通道淹没识别: {img_path}")
             self.log.append(f"阈值: {thresh:.2f}")
 
-            result = self.predictor.predict(img_path, thresh=thresh)
+            group = _m04_validation_group(img_path)
+            result_group = group or "business"
+            output_root = module_processed_dir("M04", result_group, create=True)
+            mask_path = output_root / "masks" / f"{Path(img_path).stem}_mask.png"
+            overlay_path = output_root / "overlays" / f"{Path(img_path).stem}_overlay.png"
+            result = self.predictor.predict(
+                img_path,
+                thresh=thresh,
+                mask_path=mask_path,
+                overlay_path=overlay_path,
+            )
             self.last_result = result
 
             self.show_rgb_image(self.label_orig, result["original"])
@@ -206,9 +248,14 @@ class InundationMonitoringWidget(QWidget):
             self.log.append(f"掩膜输出: {result['mask_path']}")
             self.log.append(f"叠加图输出: {result['overlay_path']}")
             try:
-                standard_outputs = self._export_standard_result(result, img_path)
-                self.log.append(f"标准淹没范围: {standard_outputs['inundation_tif']}")
-                self.log.append(f"标准统计报表: {standard_outputs['stats_xlsx']}")
+                if self._is_validation_input(img_path):
+                    validation_outputs = self._export_validation_result(result, img_path)
+                    self.log.append(f"验证集叠加图: {validation_outputs['overlay']}")
+                    self.log.append(f"验证集掩膜图: {validation_outputs['mask']}")
+                else:
+                    standard_outputs = self._export_standard_result(result, img_path)
+                    self.log.append(f"标准淹没范围: {standard_outputs['inundation_tif']}")
+                    self.log.append(f"标准统计报表: {standard_outputs['stats_xlsx']}")
             except Exception as export_exc:
                 self.log.append(f"[WARN] 标准成果未导出: {export_exc}")
             self.log.append("识别完成\n")
@@ -216,7 +263,49 @@ class InundationMonitoringWidget(QWidget):
             self.log.append(f"[ERROR] {e}\n")
             QMessageBox.critical(self, "识别失败", str(e))
 
+    def _is_validation_input(self, img_path: str | Path) -> bool:
+        return _m04_validation_group(img_path) is not None
+
+    def _export_validation_result(self, result: dict, img_path: str) -> dict[str, str]:
+        img_path = str(ensure_raw_source_path(img_path))
+        raw_image = Path(img_path)
+        group = _m04_validation_group(raw_image)
+        if group is None:
+            raise ValueError(f"不是 M04 统一验证输入: {raw_image}")
+        out_base = module_processed_dir("M04", group, create=True)
+        overlay_dst = Path(result["overlay_path"])
+        mask_dst = Path(result["mask_path"])
+
+        common_extra = {
+            "split": "validation",
+            "crs": "not_applicable",
+            "crs_name": "not_applicable",
+            "data_status": "module_validation_result",
+            "threshold": float(result.get("threshold", 0.5)),
+            "water_ratio": float(result.get("water_ratio", 0.0)),
+            "note": "淹没区识别原生验证集推理结果；样例区域不属于瓦赫什流域业务数据。",
+            "validation_group": group,
+        }
+        write_metadata_sidecar(
+            overlay_dst,
+            module_code="M04",
+            field="inundation_validation_overlay",
+            source_files=[raw_image],
+            extra={**common_extra, "output_type": "overlay_png"},
+        )
+        write_metadata_sidecar(
+            mask_dst,
+            module_code="M04",
+            field="inundation_validation_mask",
+            source_files=[raw_image],
+            extra={**common_extra, "output_type": "mask_png"},
+        )
+
+        mark_module_complete(infer_run_context_from_path(raw_image), "M04")
+        return {"overlay": str(overlay_dst), "mask": str(mask_dst)}
+
     def _export_standard_result(self, result: dict, img_path: str) -> dict[str, str]:
+        img_path = str(ensure_raw_source_path(img_path))
         context = infer_run_context_from_path(img_path)
         inundation_tif = module_output_path("M04", context=context, output_index=0)
         stats_xlsx = module_output_path("M04", context=context, output_index=1)
@@ -318,12 +407,13 @@ class InundationMonitoringWidget(QWidget):
             stats_xlsx,
             module_code="M04",
             field="inundated_area",
-            source_files=[img_path, inundation_tif],
+            source_files=[img_path],
             extra={
                 "scheme": context.scheme,
                 "scheme_name": context.scheme_name,
                 "period": context.period,
                 "period_name": context.period_name,
+                "intermediate_outputs": [str(inundation_tif)],
             },
         )
         mark_module_complete(context, "M04")

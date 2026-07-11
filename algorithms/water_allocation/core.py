@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import calendar
+import csv
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Callable
@@ -468,6 +469,7 @@ def calculate_monthly_demands(
     target_year: int = 2026,
     urban_quota: float = 145.0,
     rural_quota: float = 80.0,
+    water_demand_data_dir: str | Path | None = None,
 ) -> Dict[str, float]:
     """计算月度各部门需水量 
 
@@ -514,7 +516,7 @@ def calculate_monthly_demands(
 
     # 下游国家: LSTM 合并月径流预测 (Billion m³ → 百万m³)
     try:
-        result = predict_downstream_total(int(target_year))
+        result = predict_downstream_total(int(target_year), data_dir=water_demand_data_dir)
         downstream = float(result['downstream_monthly'][int(month) - 1]) * 1000
     except Exception as e:
         print(f"下游国家预测数据获取失败: {e}")
@@ -569,3 +571,206 @@ def estimate_economic_params(
     a_ground = [a_dom, a_eco, a_agr, a_ind]
     b_ground = [a_dom + 0.4, 0.1, a_agr + 0.3, a_ind + 0.5]
     return np.array([a_surface, a_ground]), np.array([b_surface, b_ground]), a_hydro, a_agr
+
+
+def run_allocation_from_config(
+    config_root: str | Path,
+    *,
+    pop_size: int = 200,
+    n_gen: int = 400,
+) -> dict:
+    """Run M08 from the complete CSV configuration without implicit inflow defaults."""
+    root = Path(config_root)
+    water_demand_data_dir = root.parents[1] / "socioeconomic" / "water_demand"
+    paths = {
+        "global": root / "supply" / "global_supply_config.csv",
+        "inflow": root / "supply" / "monthly_inflow.csv",
+        "demand": root / "demand" / "demand_parameters.csv",
+        "crops": root / "crops" / "crops.csv",
+        "weights": root / "decision_weights" / "decision_weights.csv",
+    }
+    missing = [str(path) for path in paths.values() if not path.is_file() or path.stat().st_size == 0]
+    if missing:
+        raise FileNotFoundError("M08 配置文件缺失:\n" + "\n".join(missing))
+
+    def read_rows(path: Path) -> list[dict]:
+        with path.open("r", encoding="utf-8-sig", newline="") as file:
+            return list(csv.DictReader(file))
+
+    global_rows = read_rows(paths["global"])
+    if len(global_rows) != 1:
+        raise ValueError("global_supply_config.csv 必须且只能包含一行")
+    global_cfg = global_rows[0]
+    if global_cfg.get("time_scale") != "monthly":
+        raise ValueError("当前独立运行器只接受 monthly 配置")
+    start_year = int(global_cfg["start_year"])
+    start_month = int(global_cfg["start_month"])
+    end_year = int(global_cfg["end_year"])
+    end_month = int(global_cfg["end_month"])
+    if start_year != end_year or start_month != 1 or end_month != 12:
+        raise ValueError("当前配置应提供同一自然年的 12 个月供水输入")
+    initial_surface_supply = float(global_cfg["initial_surface_supply_mcm"])
+
+    inflow_by_month = {
+        int(row["month"]): float(row["inflow_m3_s"])
+        for row in read_rows(paths["inflow"])
+        if int(row.get("year", 0)) == start_year
+    }
+    if set(inflow_by_month) != set(range(1, 13)):
+        raise ValueError("monthly_inflow.csv 必须显式提供 1-12 月全部入流；禁止使用默认 500 m3/s")
+
+    demand_values = {row["ui_key"]: float(row["value"]) for row in read_rows(paths["demand"])}
+    required_demand_keys = {
+        "pop", "urban", "reuse", "gdp", "eff", "loss", "eco",
+        "meteo.Rn", "meteo.G", "meteo.T", "meteo.u2", "meteo.es",
+        "meteo.ea", "meteo.delta", "meteo.gamma",
+    }
+    missing_demand = sorted(required_demand_keys - set(demand_values))
+    if missing_demand:
+        raise ValueError(f"demand_parameters.csv 缺少 {missing_demand}")
+
+    crop_rows = [
+        {
+            "type": row["crop_type"],
+            "stage": row["growth_stage"],
+            "area": float(row["area_km2"]),
+            "yield": float(row["yield_kg_km2"]),
+            "price": float(row["price_cny_kg"]),
+        }
+        for row in read_rows(paths["crops"])
+    ]
+    fao_kc = {
+        "冬小麦": {"初期": 0.40, "发育期": 0.8, "中期": 1.15, "后期": 0.60},
+        "细绒棉": {"初期": 0.3, "发育期": 0.7, "中期": 1.15, "后期": 0.70},
+        "玉米": {"初期": 0.30, "发育期": 0.9, "中期": 1.10, "后期": 0.50},
+        "水稻": {"初期": 1.05, "发育期": 1.15, "中期": 1.20, "后期": 0.90},
+        "油菜": {"初期": 0.50, "发育期": 0.75, "中期": 1.05, "后期": 0.50},
+    }
+    for crop in crop_rows:
+        if crop["type"] not in fao_kc or crop["stage"] not in fao_kc[crop["type"]]:
+            raise ValueError(f"未知作物或生育期: {crop['type']} / {crop['stage']}")
+
+    weight_rows = read_rows(paths["weights"])
+    weight_lookup = {(row["group"], row["name"]): float(row["value"]) for row in weight_rows}
+    preference = np.array(
+        [
+            weight_lookup[("preference", "economic")],
+            weight_lookup[("preference", "shortage")],
+            weight_lookup[("preference", "gini")],
+        ],
+        dtype=float,
+    )
+    sector_weights = np.array(
+        [weight_lookup[("sector", sector)] for sector in SECTOR_ORDER_V2], dtype=float
+    )
+    hydro_pmax = weight_lookup[("hydropower", "max_power_mw")]
+    hydro_qmax = weight_lookup[("hydropower", "max_flow_m3_s")]
+    hydro_price = weight_lookup[("hydropower", "electricity_price_cny_kwh")]
+
+    meteo = {
+        key: demand_values[f"meteo.{key}"]
+        for key in ("Rn", "G", "T", "u2", "es", "ea", "delta", "gamma")
+    }
+    et0 = calculate_et0(meteo)
+    sectors = list(SECTOR_ORDER_V2)
+    demand_matrix = np.zeros((12, len(sectors)), dtype=float)
+    for month in range(1, 13):
+        monthly = calculate_monthly_demands(
+            month=month,
+            pop_wan=demand_values["pop"],
+            urban_rate_percent=demand_values["urban"],
+            gdp_yi=demand_values["gdp"],
+            reuse_percent=demand_values["reuse"],
+            irrigation_eff=demand_values["eff"],
+            eco_base=demand_values["eco"],
+            et0_daily=et0,
+            crop_rows=crop_rows,
+            fao_kc=fao_kc,
+            target_year=start_year,
+            water_demand_data_dir=water_demand_data_dir,
+        )
+        demand_matrix[month - 1] = [monthly[sector] for sector in sectors]
+
+    supply = np.zeros((12, 2), dtype=float)
+    base_per_month = initial_surface_supply / 12.0
+    for month in range(1, 13):
+        seconds = calendar.monthrange(start_year, month)[1] * 24 * 3600
+        supply[month - 1, 0] = base_per_month + inflow_by_month[month] * seconds / 1_000_000.0
+
+    a_four, b_four, a_hydro, a_agr = estimate_economic_params(
+        crop_rows,
+        float(np.mean(demand_matrix[:, sectors.index(SECTOR_AGR)])),
+        hydro_pmax,
+        hydro_qmax,
+        hydro_price,
+    )
+    a_matrix = np.column_stack([a_four, np.array([a_hydro + 1e-9, 1e-9])])
+    b_matrix = np.column_stack([b_four, np.array([0.0, 0.0])])
+    loss_rate = demand_values["loss"] / 100.0
+    params = {
+        "n_sources": 2,
+        "n_regions": 1,
+        "m_sectors": len(sectors),
+        "n_periods": 12,
+        "time_scale": "monthly",
+        "a": a_matrix,
+        "b": b_matrix,
+        "T": sector_weights,
+        "D": demand_matrix,
+        "W": supply,
+        "F_min": demand_matrix * 0.3,
+        "F_max": demand_matrix * 1.5,
+        "loss_rates": np.array([loss_rate]),
+    }
+    result = run_nsga2_opt(params, pop_size=pop_size, n_gen=n_gen)
+    if result is None or result.F is None or result.X is None:
+        raise RuntimeError("NSGA-II 未找到可行分水方案")
+
+    objectives = np.asarray(result.F, dtype=float)
+    minimum = objectives.min(axis=0)
+    span = np.where(objectives.max(axis=0) - minimum == 0, 1e-9, objectives.max(axis=0) - minimum)
+    best_index = int(np.argmin(np.linalg.norm(((objectives - minimum) / span) * preference, axis=1)))
+    best = result.X[best_index].reshape((12, 2, 1, len(sectors)))
+    received = best[:, 0, 0, :] * (1.0 - loss_rate) + best[:, 1, 0, :]
+    shortage = np.maximum(0.0, demand_matrix - received)
+
+    rows: list[dict] = []
+    for month in range(1, 13):
+        for sector_index, sector in enumerate(sectors):
+            demand_value = demand_matrix[month - 1, sector_index]
+            received_value = received[month - 1, sector_index]
+            rows.append(
+                {
+                    "year": start_year,
+                    "month": month,
+                    "sector": sector,
+                    "demand_million_m3": float(demand_value),
+                    "surface_release_million_m3": float(best[month - 1, 0, 0, sector_index]),
+                    "groundwater_million_m3": float(best[month - 1, 1, 0, sector_index]),
+                    "received_million_m3": float(received_value),
+                    "shortage_million_m3": float(shortage[month - 1, sector_index]),
+                    "satisfaction_ratio": float(received_value / demand_value) if demand_value > 0 else 1.0,
+                    "loss_rate": loss_rate,
+                }
+            )
+
+    return {
+        "config_files": [str(path) for path in paths.values()]
+        + [str(path) for path in sorted(water_demand_data_dir.glob("*.csv"))],
+        "year": start_year,
+        "time_scale": "monthly",
+        "sectors": sectors,
+        "rows": rows,
+        "profit": float(-objectives[best_index, 0]),
+        "shortage_million_m3": float(objectives[best_index, 1]),
+        "gini": float(objectives[best_index, 2]),
+        "total_supply_million_m3": float(supply[:, 0].sum()),
+        "total_demand_million_m3": float(demand_matrix.sum()),
+        "inflow_source": str(paths["inflow"]),
+        "inflow_is_explicit": True,
+        "population_growth_configured_but_not_used": "pop_growth" in demand_values,
+        "domestic_reuse_configured_but_not_used": "dom_reuse" in demand_values,
+        "optimizer": {"name": "NSGA-II", "pop_size": pop_size, "n_gen": n_gen, "seed": 1},
+        "a_hydro": float(a_hydro),
+        "a_agriculture": float(a_agr),
+    }

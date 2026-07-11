@@ -1,12 +1,12 @@
 ﻿"""
-RAFT / LK river surface velocity measurement plugin widget.
+RAFT river surface optical-flow measurement plugin widget.
 
-Provides a QWidget interface for optical-flow-based surface velocity estimation
-on river video footage, supporting both Lucas-Kanade (LK) sparse and RAFT dense methods.
+Provides a QWidget interface for full-video RAFT dense optical-flow processing.
 """
 
 import os
 import math
+from pathlib import Path
 import numpy as np
 import cv2
 
@@ -23,15 +23,14 @@ from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
 from app.digital_twin_standard import (
+    ensure_raw_source_path,
     infer_run_context_from_path,
     mark_module_complete,
     module_output_path,
-    period_to_date,
     standard_dialog_dir,
     write_metadata_sidecar,
-    write_standard_csv,
 )
-from algorithms.raft.core import DEFAULT_MODEL_PATH, run_raft_analysis, load_raft_model
+from algorithms.raft.core import DEFAULT_MODEL_PATH, run_raft_video_full
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +57,7 @@ class AnalysisWorker(QThread):
     error = pyqtSignal(str)
 
     def __init__(self, video_path, method, height_m, fov_deg, tilt_deg,
-                 start_frame, total_frames, model_path):
+                 start_frame, total_frames, model_path, output_csv):
         super().__init__()
         self.video_path = video_path
         self.method = method
@@ -68,6 +67,7 @@ class AnalysisWorker(QThread):
         self.start_frame = start_frame
         self.total_frames = total_frames
         self.model_path = model_path
+        self.output_csv = output_csv
 
     def _process_lk(self):
         """Lucas-Kanade sparse optical flow analysis."""
@@ -173,20 +173,17 @@ class AnalysisWorker(QThread):
     def run(self):
         try:
             if self.method == "RAFT":
-                result = run_raft_analysis(
+                result = run_raft_video_full(
                     video_path=self.video_path,
-                    height_m=self.height_m,
-                    fov_deg=self.fov_deg,
-                    tilt_deg=self.tilt_deg,
-                    start_frame=self.start_frame,
-                    total_frames=self.total_frames,
+                    output_csv=self.output_csv,
                     model_path=self.model_path,
-                    progress_callback=lambda i, t, msg: self.progress.emit(i, t, msg),
+                    progress_callback=lambda i, t: self.progress.emit(
+                        i, t, f"[RAFT] 正在处理完整视频帧对 {i}/{t} ..."
+                    ),
                 )
-                if result["status"] == "error":
-                    self.error.emit(result["message"])
-                    return
                 result["method"] = "RAFT"
+                direction = result.get("mean_flow_direction_deg")
+                result["all_angles"] = [] if direction is None else [direction]
                 self.finished.emit(result)
             else:
                 result = self._process_lk()
@@ -220,7 +217,7 @@ class RaftWidget(QWidget):
         ctrl_row.addWidget(self.btn_upload)
 
         self.cmb_method = QComboBox()
-        self.cmb_method.addItems(["RAFT", "LK"])
+        self.cmb_method.addItems(["RAFT"])
         ctrl_row.addWidget(QLabel("  方法:"))
         ctrl_row.addWidget(self.cmb_method)
 
@@ -305,9 +302,12 @@ class RaftWidget(QWidget):
             self, "选择视频文件", standard_dialog_dir("raw", module_code="M05"),
             "Video Files (*.mp4 *.avi *.mov)")
         if path:
-            self.video_path = path
-            self.lbl_status.setText(f"已选中视频: {os.path.basename(path)}")
-            self.btn_run.setEnabled(True)
+            try:
+                self.video_path = str(ensure_raw_source_path(path))
+                self.lbl_status.setText(f"已选中视频: {os.path.basename(path)}")
+                self.btn_run.setEnabled(True)
+            except Exception as exc:
+                QMessageBox.warning(self, "输入路径错误", str(exc))
 
     def _start_analysis(self):
         if not self.video_path:
@@ -336,7 +336,11 @@ class RaftWidget(QWidget):
 
         self._worker = AnalysisWorker(
             self.video_path, method, height_m, fov_deg, tilt_deg,
-            start_frame, total_frames, self._current_model_path
+            start_frame, total_frames, self._current_model_path,
+            str(module_output_path(
+                "M05",
+                context=infer_run_context_from_path(self.video_path),
+            )),
         )
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_finished)
@@ -355,14 +359,26 @@ class RaftWidget(QWidget):
         self._reenable_controls()
 
         method = results.get("method", "?")
-        vel = results.get("velocity", 0)
-        self.lbl_status.setText(f"[{method}] 流速测算完毕 {vel:.4f} m/s")
+        if method == "RAFT":
+            pixel_velocity = results.get("median_velocity_px_frame")
+            velocity_text = (
+                f"{float(pixel_velocity):.4f} px/frame"
+                if pixel_velocity is not None
+                else "无有效像素速度"
+            )
+            self.lbl_status.setText(f"[RAFT] 完整视频处理完毕，{velocity_text}；m/s 未标定")
+        else:
+            vel = float(results.get("velocity", 0.0))
+            self.lbl_status.setText(f"[{method}] 流速测算完毕 {vel:.4f} m/s")
         try:
             standard_csv = self._export_standard_result(results)
-            self.lbl_status.setText(f"[{method}] 流速测算完毕 {vel:.4f} m/s；已导出标准CSV")
+            if method == "RAFT":
+                self.lbl_status.setText(self.lbl_status.text() + "；逐帧对 CSV 已保存")
+            else:
+                self.lbl_status.setText(self.lbl_status.text() + "；已导出标准 CSV")
             self.lbl_status.setToolTip(str(standard_csv))
         except Exception as exc:
-            self.lbl_status.setText(f"[{method}] 流速测算完毕 {vel:.4f} m/s；标准CSV导出失败")
+            self.lbl_status.setText(self.lbl_status.text() + "；标准成果登记失败")
             QMessageBox.warning(self, "标准成果导出失败", str(exc))
 
         # ---- Left chart: flow visualization ----
@@ -423,62 +439,35 @@ class RaftWidget(QWidget):
         self.canvas_right.draw()
 
     def _export_standard_result(self, results):
+        self.video_path = str(ensure_raw_source_path(self.video_path))
         context = infer_run_context_from_path(self.video_path)
-        output_path = module_output_path("M05", context=context)
+        if results.get("method") != "RAFT":
+            raise ValueError("统一 M05 正式成果只接受完整视频 RAFT 运行结果。")
 
-        angles = np.asarray(results.get("all_angles") or [], dtype=float)
-        if angles.size:
-            direction_deg = float(np.degrees(np.angle(np.mean(np.exp(1j * np.radians(angles))))) % 360.0)
-        else:
-            direction_deg = ""
+        output_path = Path(results.get("output_csv", "")).expanduser().resolve()
+        expected_path = module_output_path("M05", context=context).resolve()
+        if output_path != expected_path:
+            raise ValueError(f"RAFT 成果未写入统一 processed: {output_path}")
+        if not output_path.is_file() or output_path.stat().st_size == 0:
+            raise FileNotFoundError(output_path)
 
-        fieldnames = [
-            "date",
-            "period",
-            "scheme",
-            "module_code",
-            "method",
-            "velocity_m_s",
-            "mean_flow_direction_deg",
-            "fps",
-            "frame_count",
-            "valid_pairs",
-            "angle_sample_count",
-            "video_file",
-            "model_file",
-        ]
-        write_standard_csv(
-            output_path,
-            fieldnames=fieldnames,
-            rows=[
-                {
-                    "date": period_to_date(context.period),
-                    "period": context.period,
-                    "scheme": context.scheme,
-                    "module_code": "M05",
-                    "method": results.get("method", ""),
-                    "velocity_m_s": f"{float(results.get('velocity', 0.0)):.6f}",
-                    "mean_flow_direction_deg": f"{direction_deg:.3f}" if direction_deg != "" else "",
-                    "fps": f"{float(results.get('fps', 0.0)):.3f}",
-                    "frame_count": int(results.get("frame_count", self.spin_total.value()) or 0),
-                    "valid_pairs": int(results.get("valid_pairs", 0) or 0),
-                    "angle_sample_count": int(angles.size),
-                    "video_file": os.path.abspath(self.video_path),
-                    "model_file": self._current_model_path if results.get("method") == "RAFT" else "",
-                }
-            ],
-        )
         write_metadata_sidecar(
             output_path,
             module_code="M05",
-            field="velocity",
+            field="frame_pair_pixel_velocity",
             source_files=[self.video_path],
             extra={
-                "scheme": context.scheme,
-                "scheme_name": context.scheme_name,
-                "period": context.period,
-                "period_name": context.period_name,
-                "method": results.get("method", ""),
+                "output_type": "full_video_frame_pair_velocity",
+                "method": "RAFT",
+                "model_weight": self._current_model_path,
+                "threshold_or_config": {
+                    "iters": results.get("iters"),
+                    "working_size": results.get("working_size"),
+                    "physical_calibration": False,
+                },
+                "processed_pair_count": results.get("processed_pair_count"),
+                "valid_pair_count": results.get("valid_pair_count"),
+                "velocity_m_s_status": results.get("velocity_m_s_status"),
             },
         )
         mark_module_complete(context, "M05")

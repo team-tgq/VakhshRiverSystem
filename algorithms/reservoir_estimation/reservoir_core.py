@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -70,6 +71,28 @@ DEFAULT_CURVE = np.array(
 )
 
 
+def load_hypsometry_csv(path: str | Path) -> np.ndarray:
+    source = Path(path)
+    if not source.is_file() or source.stat().st_size == 0:
+        raise FileNotFoundError(source)
+    rows: list[tuple[float, float, float]] = []
+    with source.open("r", encoding="utf-8-sig", newline="") as file:
+        for row in csv.DictReader(file):
+            try:
+                rows.append(
+                    (
+                        float(row.get("elevation_m", row.get("Elevation (m)", ""))),
+                        float(row.get("area_km2", row.get("Area (sq.km)", ""))),
+                        float(row.get("storage_mcm", row.get("Storage (mcm)", ""))),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+    if len(rows) < 2:
+        raise ValueError(f"水位-面积-库容曲线至少需要两行有效数据: {source}")
+    return np.asarray(rows, dtype=float)
+
+
 @dataclass
 class EstimateResult:
     date: str
@@ -129,12 +152,17 @@ class NurekReservoirEstimator:
     def __init__(
         self,
         curve: np.ndarray | None = None,
+        curve_path: str | Path | None = None,
         total_capacity_km3: float = 10.5,
         active_storage_km3: float = 4.2,
     ) -> None:
         self.total_capacity_km3 = float(total_capacity_km3)
         self.active_storage_km3 = float(active_storage_km3)
-        self.curve = self._prepare_curve(DEFAULT_CURVE if curve is None else curve)
+        if curve is not None and curve_path is not None:
+            raise ValueError("curve 与 curve_path 只能指定一个")
+        selected_curve = load_hypsometry_csv(curve_path) if curve_path is not None else curve
+        self.curve = self._prepare_curve(DEFAULT_CURVE if selected_curve is None else selected_curve)
+        self.curve_source = str(Path(curve_path).resolve()) if curve_path is not None else "embedded_default_curve"
 
     @staticmethod
     def _prepare_curve(curve: np.ndarray) -> np.ndarray:
@@ -189,7 +217,7 @@ class NurekReservoirEstimator:
             volume_mcm=volume,
             model_area_km2=area,
             model_level_m=None,
-            method="Level-to-volume linear interpolation on embedded Nurek prototype curve.",
+            method=f"Level-to-volume linear interpolation on Nurek curve: {self.curve_source}",
             warnings=warnings,
         )
 
@@ -205,7 +233,7 @@ class NurekReservoirEstimator:
             volume_mcm=volume,
             model_area_km2=None,
             model_level_m=level,
-            method="Area-to-level and area-to-volume linear interpolation on embedded Nurek prototype curve.",
+            method=f"Area-to-level and area-to-volume linear interpolation on Nurek curve: {self.curve_source}",
             warnings=warnings,
         )
 
@@ -226,8 +254,8 @@ class NurekReservoirEstimator:
         estimate = self.estimate_from_area(date=date, area_km2=area_result.area_km2)
         estimate.input_type = "uploaded_remote_sensing_image"
         estimate.method = (
-            "Image threshold water-area extraction, then area-to-volume interpolation. "
-            "Use only as a basic visualization estimate."
+            "Image threshold water-area extraction, then area-to-volume interpolation on "
+            f"Nurek curve: {self.curve_source}"
         )
         estimate.warnings.extend(area_result.warnings)
         return area_result, estimate

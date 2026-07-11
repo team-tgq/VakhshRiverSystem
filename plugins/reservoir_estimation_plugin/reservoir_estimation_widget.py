@@ -1,3 +1,5 @@
+import csv
+import json
 from pathlib import Path
 
 from PyQt5.QtCore import QDate, Qt
@@ -24,10 +26,16 @@ from algorithms.reservoir_estimation.reservoir_core import NurekReservoirEstimat
 from app.digital_twin_standard import (
     DEFAULT_PERIOD,
     default_run_context,
+    ensure_raw_source_path,
+    infer_run_context_from_path,
+    mark_module_complete,
     module_output_path,
+    module_processed_dir,
     period_to_date,
+    raw_data_dir,
     standard_dialog_dir,
     write_metadata_sidecar,
+    write_raw_metadata_sidecar,
     write_standard_csv,
 )
 from app.ui_hints import attach_hint
@@ -36,6 +44,28 @@ from app.ui_hints import attach_hint
 PLUGIN_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = PLUGIN_DIR.parent.parent / "algorithms" / "reservoir_estimation" / "output" / "Nurek"
 PLOT_PATH = OUTPUT_DIR / "last_estimate_plot.png"
+
+
+def _reservoir_raw_paths() -> dict[str, Path]:
+    return {
+        "parameters": raw_data_dir("reservoir", "parameters") / "reservoir_parameters.csv",
+        "observations": raw_data_dir("reservoir", "observations") / "reservoir_observations.csv",
+        "curve": raw_data_dir("reservoir", "hypsometry") / "reservoir_hypsometry.csv",
+    }
+
+
+def _configured_estimator() -> NurekReservoirEstimator:
+    paths = _reservoir_raw_paths()
+    for path in paths.values():
+        if not path.is_file() or path.stat().st_size == 0:
+            raise FileNotFoundError(path)
+    with paths["parameters"].open("r", encoding="utf-8-sig", newline="") as file:
+        values = {row["parameter"]: row["value"] for row in csv.DictReader(file)}
+    return NurekReservoirEstimator(
+        curve_path=paths["curve"],
+        total_capacity_km3=float(values["total_capacity"]),
+        active_storage_km3=float(values["active_storage"]),
+    )
 
 
 def _context_from_result_date(date_text: str | None):
@@ -62,7 +92,7 @@ def _context_from_result_date(date_text: str | None):
 class ReservoirEstimationWidget(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.estimator = NurekReservoirEstimator()
+        self.estimator = _configured_estimator()
         self.image_path: Path | None = None
         self.init_ui()
 
@@ -99,10 +129,20 @@ class ReservoirEstimationWidget(QWidget):
 
         compute = QPushButton("开始估算")
         compute.clicked.connect(self.estimate_manual)
+        config_row = QWidget()
+        config_layout = QHBoxLayout(config_row)
+        config_layout.setContentsMargins(0, 0, 0, 0)
+        load_config = QPushButton("加载观测CSV")
+        save_config = QPushButton("回写当前观测CSV")
+        load_config.clicked.connect(self.load_observation_config)
+        save_config.clicked.connect(self.save_observation_config)
+        config_layout.addWidget(load_config)
+        config_layout.addWidget(save_config)
 
         form.addRow("日期", self.manual_date)
         form.addRow("水位 (m)", self.level_input)
         form.addRow("水面面积 (km2)", self.area_input)
+        form.addRow("配置", config_row)
         form.addRow("", compute)
 
         self.manual_result = QTextEdit()
@@ -181,13 +221,92 @@ class ReservoirEstimationWidget(QWidget):
     def choose_image(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "选择遥感影像",
+            "选择 raw 中的遥感影像",
             standard_dialog_dir("raw"),
             "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;All files (*.*)",
         )
         if path:
-            self.image_path = Path(path)
-            self.image_file_label.setText(self.image_path.name)
+            try:
+                self.image_path = ensure_raw_source_path(path)
+                self.image_file_label.setText(self.image_path.name)
+            except Exception as exc:
+                QMessageBox.warning(self, "输入路径错误", str(exc))
+
+    def load_observation_config(self):
+        path = _reservoir_raw_paths()["observations"]
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as file:
+                rows = list(csv.DictReader(file))
+            if not rows:
+                raise ValueError(f"观测 CSV 没有数据行: {path}")
+            row = rows[-1]
+            date_value = QDate.fromString(str(row.get("date", "")), "yyyy-MM-dd")
+            if date_value.isValid():
+                self.manual_date.setDate(date_value)
+            self.level_input.setText(str(row.get("water_level_m", "")))
+            self.area_input.setText(str(row.get("surface_area_km2", "")))
+            QMessageBox.information(self, "加载完成", f"已加载: {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "加载失败", str(exc))
+
+    def _record_manual_observation(self, result=None) -> Path:
+        path = _reservoir_raw_paths()["observations"]
+        rows: list[dict] = []
+        if path.exists():
+            with path.open("r", encoding="utf-8-sig", newline="") as file:
+                rows = list(csv.DictReader(file))
+        date_text = self.manual_date.date().toString("yyyy-MM-dd")
+        level_text = self.level_input.text().strip()
+        area_text = self.area_input.text().strip()
+        current_row = {
+            "date": date_text,
+            "reservoir_id": "nurek",
+            "sensor": "manual_ui",
+            "water_level_m": level_text,
+            "surface_area_km2": area_text,
+            "source": "reservoir_estimation_plugin_ui",
+            "quality_status": "user_entered; not independently verified",
+        }
+        if not rows or any(str(rows[-1].get(key, "")) != str(value) for key, value in current_row.items()):
+            rows.append(current_row)
+        write_standard_csv(
+            path,
+            fieldnames=[
+                "date",
+                "reservoir_id",
+                "sensor",
+                "water_level_m",
+                "surface_area_km2",
+                "source",
+                "quality_status",
+            ],
+            rows=rows,
+        )
+        write_raw_metadata_sidecar(
+            path,
+            data_role="reservoir_observation_record",
+            data_status="user_entered",
+            source_name="M09 界面观测配置",
+            source_files=[Path(__file__).resolve()],
+            extra={
+                "data_type": "reservoir_observation_record",
+                "dataset_name": "M09 reservoir observations",
+                "source_origin": "reservoir_estimation_plugin UI",
+                "consumer_modules": ["M09"],
+                "date": date_text,
+                "is_module_native": True,
+            },
+        )
+        return path
+
+    def save_observation_config(self):
+        try:
+            if not self.level_input.text().strip() and not self.area_input.text().strip():
+                raise ValueError("水位和水面面积不能同时为空。")
+            path = self._record_manual_observation()
+            QMessageBox.information(self, "回写完成", f"已写入: {path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "回写失败", str(exc))
 
     def estimate_manual(self):
         try:
@@ -246,9 +365,15 @@ class ReservoirEstimationWidget(QWidget):
         label.set_plot(PLOT_PATH)
 
     def _export_standard_result(self, result, *, source_files: list[Path]) -> dict[str, Path]:
-        context = _context_from_result_date(result.date)
+        source_files = [ensure_raw_source_path(path) for path in source_files]
+        context = infer_run_context_from_path(source_files[0]) if source_files else _context_from_result_date(result.date)
+        raw_paths = _reservoir_raw_paths()
+        observation_source = self._record_manual_observation(result) if not source_files else None
         storage_csv = module_output_path("M09", context=context, output_index=0)
-        source_items = [Path(__file__).resolve(), OUTPUT_DIR / "reservoir_hypsometry.csv", *source_files]
+        summary_json = module_output_path("M09", context=context, output_index=1)
+        source_items = [raw_paths["parameters"], raw_paths["curve"], *source_files]
+        if observation_source is not None:
+            source_items.append(observation_source)
 
         storage_million_m3 = float(result.estimated_volume_mcm)
         storage_rows = [
@@ -312,9 +437,40 @@ class ReservoirEstimationWidget(QWidget):
                     "storage_10k_m3": "万m3",
                     "storage_km3": "km3",
                 },
+                "threshold_or_config": {
+                    "curve_source": str(raw_paths["curve"]),
+                    "total_capacity_km3": self.estimator.total_capacity_km3,
+                    "active_storage_km3": self.estimator.active_storage_km3,
+                },
             },
         )
-        return {"storage": storage_csv}
+        summary_payload = {
+            "date": result.date or period_to_date(context.period),
+            "reservoir_name": "Nurek",
+            "input_type": result.input_type,
+            "estimated_storage_mcm": storage_million_m3,
+            "estimated_storage_km3": result.estimated_volume_km3,
+            "curve_source": str(raw_paths["curve"]),
+            "outflow_generated": False,
+            "warnings": result.warnings,
+        }
+        summary_json.parent.mkdir(parents=True, exist_ok=True)
+        summary_json.write_text(
+            json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        write_metadata_sidecar(
+            summary_json,
+            module_code="M09",
+            field="reservoir_estimation_summary",
+            source_files=source_items,
+            extra={
+                "output_type": "reservoir_estimation_summary",
+                "threshold_or_config": {"curve_source": str(raw_paths["curve"])},
+                "outflow_generated": False,
+            },
+        )
+        mark_module_complete(context, "M09")
+        return {"storage": storage_csv, "summary": summary_json}
 
 
 class PlotLabel(QLabel):

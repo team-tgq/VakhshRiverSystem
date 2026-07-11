@@ -59,9 +59,13 @@ def distribute_to_months(annual_total, month_ratios=None):
     return monthly_values
 
 
-def _load_afghanistan_data():
+def _resolve_data_dir(data_dir=None):
+    return Path(data_dir).expanduser().resolve() if data_dir is not None else _DATA_DIR
+
+
+def _load_afghanistan_data(data_dir=None):
     """加载阿富汗用水数据 (AQUASTAT 多变量 CSV 格式)"""
-    csv_path = str(_DATA_DIR / 'Afghanistan_water_discharger.csv')
+    csv_path = str(_resolve_data_dir(data_dir) / 'Afghanistan_water_discharger.csv')
     df = pd.read_csv(csv_path)
     mask = df['Variable'] == 'Total water withdrawal'
     afg = df[mask][['Year', 'Value']].drop_duplicates().sort_values('Year')
@@ -82,13 +86,14 @@ def _predict_one_country(historical_values, hist_years, target_year):
     return pred[-1]
 
 
-def predict_monthly_water_demand(target_year):
+def predict_monthly_water_demand(target_year, data_dir=None):
     """
     预测指定年份土库曼斯坦 + 乌兹别克斯坦的月度用水量 (Billion m³)
     保留向后兼容
     """
-    df_tkm = pd.read_csv(str(_DATA_DIR / 'Turkmenistan_water_data.csv'))
-    df_uzb = pd.read_csv(str(_DATA_DIR / 'Uzbekistan_water_data.csv'))
+    resolved_data_dir = _resolve_data_dir(data_dir)
+    df_tkm = pd.read_csv(str(resolved_data_dir / 'Turkmenistan_water_data.csv'))
+    df_uzb = pd.read_csv(str(resolved_data_dir / 'Uzbekistan_water_data.csv'))
 
     target = 'Total water withdrawal'
 
@@ -129,7 +134,7 @@ def predict_monthly_water_demand(target_year):
     }
 
 
-def predict_downstream_total(target_year):
+def predict_downstream_total(target_year, data_dir=None):
     """
     预测指定年份下游三国 (土库曼斯坦 + 乌兹别克斯坦 + 阿富汗)
     合并后的月度用水量，已应用 0.2 系数
@@ -144,19 +149,20 @@ def predict_downstream_total(target_year):
         }
     """
     # --- 土库曼斯坦 ---
-    df_tkm = pd.read_csv(str(_DATA_DIR / 'Turkmenistan_water_data.csv'))
+    resolved_data_dir = _resolve_data_dir(data_dir)
+    df_tkm = pd.read_csv(str(resolved_data_dir / 'Turkmenistan_water_data.csv'))
     tkm_hist = df_tkm['Total water withdrawal'].values
     tkm_years = df_tkm['Year'].values.astype(int)
     tkm_annual = _predict_one_country(tkm_hist, tkm_years, target_year) * DOWNSTREAM_SHARE_FACTOR
 
     # --- 乌兹别克斯坦 ---
-    df_uzb = pd.read_csv(str(_DATA_DIR / 'Uzbekistan_water_data.csv'))
+    df_uzb = pd.read_csv(str(resolved_data_dir / 'Uzbekistan_water_data.csv'))
     uzb_hist = df_uzb['Total water withdrawal'].values
     uzb_years = df_uzb['Year'].values.astype(int)
     uzb_annual = _predict_one_country(uzb_hist, uzb_years, target_year) * DOWNSTREAM_SHARE_FACTOR
 
     # --- 阿富汗 ---
-    afg_years, afg_vals = _load_afghanistan_data()
+    afg_years, afg_vals = _load_afghanistan_data(resolved_data_dir)
     afg_annual = _predict_one_country(afg_vals, afg_years, target_year) * DOWNSTREAM_SHARE_FACTOR
 
     # --- 合并 ---

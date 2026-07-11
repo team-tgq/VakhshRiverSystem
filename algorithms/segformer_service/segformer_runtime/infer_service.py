@@ -65,6 +65,19 @@ def get_palette_and_classes(task: str):
     return classes, palette
 
 
+def imwrite_unicode(path: str, image: np.ndarray) -> bool:
+    """Write with cv2 encoding while allowing non-ASCII Windows paths."""
+    extension = os.path.splitext(path)[1] or '.png'
+    ok, encoded = cv2.imencode(extension, image)
+    if not ok:
+        return False
+    try:
+        encoded.tofile(path)
+    except OSError:
+        return False
+    return True
+
+
 def save_mask(seg_map: np.ndarray, mask_out: str):
     ensure_parent_dir(mask_out)
 
@@ -74,7 +87,7 @@ def save_mask(seg_map: np.ndarray, mask_out: str):
     else:
         mask = seg_map.astype(np.uint8)
 
-    ok = cv2.imwrite(mask_out, mask)
+    ok = imwrite_unicode(mask_out, mask)
     if not ok:
         raise RuntimeError(f'掩码保存失败: {mask_out}')
 
@@ -95,7 +108,7 @@ def save_overlay(image_path: str, seg_map: np.ndarray, overlay_out: str, task: s
 
     overlay = cv2.addWeighted(img, 1 - alpha, color_mask, alpha, 0)
 
-    ok = cv2.imwrite(overlay_out, overlay)
+    ok = imwrite_unicode(overlay_out, overlay)
     if not ok:
         raise RuntimeError(f'叠加图保存失败: {overlay_out}')
 

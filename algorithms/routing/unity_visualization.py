@@ -7,8 +7,15 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_UNITY_DIR = PROJECT_ROOT / "tjk"
-DEFAULT_UNITY_EXE = DEFAULT_UNITY_DIR / "tjk.exe"
+UNITY_EXE_ENV = "VAKHSH_ROUTING_UNITY_EXE"
+UNITY_SEARCH_DIRS = (
+    PROJECT_ROOT / "algorithms" / "routing" / "tjk",
+    PROJECT_ROOT / "algorithms" / "routing" / "unity_build",
+    PROJECT_ROOT / "algorithms" / "routing" / "unity",
+    PROJECT_ROOT / "plugins" / "routing_plugin" / "tjk",
+    PROJECT_ROOT / "tjk",
+)
+PREFERRED_EXE_NAMES = ("tjk.exe", "TJK.exe")
 
 
 @dataclass(frozen=True)
@@ -19,16 +26,68 @@ class UnityLaunchResult:
 
 
 def resolve_unity_exe(custom_path: str | None = None) -> Path:
-    candidate = Path(custom_path).expanduser() if custom_path else DEFAULT_UNITY_EXE
-    if not candidate.is_absolute():
-        candidate = PROJECT_ROOT / candidate
-    candidate = candidate.resolve()
+    candidate_text = custom_path or os.environ.get(UNITY_EXE_ENV)
+    if candidate_text:
+        candidate = Path(candidate_text).expanduser()
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / candidate
+        candidate = candidate.resolve()
 
-    if not candidate.exists():
-        raise FileNotFoundError(f"未找到 Unity 可执行文件: {candidate}")
-    if candidate.suffix.lower() != ".exe":
-        raise ValueError(f"Unity 可执行文件必须是 .exe: {candidate}")
-    return candidate
+        if not candidate.exists():
+            raise FileNotFoundError(f"未找到 Unity 可执行文件: {candidate}")
+        if candidate.suffix.lower() != ".exe":
+            raise ValueError(f"Unity 可执行文件必须是 .exe: {candidate}")
+        return candidate
+
+    attempted: list[Path] = []
+    incomplete: list[str] = []
+    for candidate in _iter_unity_exe_candidates():
+        attempted.append(candidate)
+        if not candidate.exists() or candidate.suffix.lower() != ".exe":
+            continue
+        try:
+            check_unity_build(candidate)
+        except FileNotFoundError as exc:
+            incomplete.append(str(exc))
+            continue
+        return candidate.resolve()
+
+    checked = "\n".join(f"- {path}" for path in attempted)
+    hint = (
+        "未找到可启动的 Unity 打包程序。\n"
+        "请把完整 Unity build 放到 algorithms/routing/tjk/ 或 algorithms/routing/unity_build/，"
+        "目录内需要同时包含 .exe、*_Data 文件夹和 UnityPlayer.dll。\n"
+        f"也可以设置环境变量 {UNITY_EXE_ENV}=完整 exe 路径。"
+    )
+    if incomplete:
+        hint += "\n已发现但不完整的 Unity build:\n" + "\n".join(f"- {item}" for item in incomplete)
+    if checked:
+        hint += "\n已检查路径:\n" + checked
+    raise FileNotFoundError(hint)
+
+
+def _iter_unity_exe_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+
+    def add(path: Path) -> None:
+        resolved = path.resolve() if path.exists() else path
+        if resolved not in seen:
+            seen.add(resolved)
+            candidates.append(path)
+
+    for directory in UNITY_SEARCH_DIRS:
+        for exe_name in PREFERRED_EXE_NAMES:
+            add(directory / exe_name)
+        if directory.exists():
+            for exe_path in sorted(directory.glob("*.exe")):
+                add(exe_path)
+            for subdir in sorted(path for path in directory.iterdir() if path.is_dir()):
+                for exe_name in PREFERRED_EXE_NAMES:
+                    add(subdir / exe_name)
+                for exe_path in sorted(subdir.glob("*.exe")):
+                    add(exe_path)
+    return candidates
 
 
 def check_unity_build(exe_path: Path) -> None:

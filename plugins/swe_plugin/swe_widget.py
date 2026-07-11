@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import inspect
 import os
 from pathlib import Path
@@ -31,19 +32,20 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from app.digital_twin_standard import (
     DEFAULT_PERIOD,
     TARGET_CRS,
     baseline_dir,
     default_run_context,
+    iter_raw_run_contexts,
     mark_module_complete,
     module_output_path,
+    module_processed_dir,
     period_to_date,
-    processed_dir,
+    raw_data_dir,
     write_metadata_sidecar,
 )
-from algorithms.swe import swe_assessment
+from algorithms.swe.daily_ml_pipeline import MODEL_PATH, run_unified_forcing_offline
 
 
 DISPLAY_LAYER_KEY = "swe_raster"
@@ -51,11 +53,10 @@ DISPLAY_LAYER_LABEL = "SWE"
 DISPLAY_LONG_EDGE = 960
 INPUT_DATA_TEXT = (
     "输入数据说明\n"
-    "静态输入：高程、坡度、坡向、分区。\n"
-    "动态输入：GFS 日尺度气温与降水、温度分相后的固态降水、前一日 SWE 状态、近几日滚动统计。\n"
-    "雪盖约束：VIIRS 日雪盖分数，用于约束当天是否有雪。\n"
-    "DEM 订正：若检测到 SWE_DEM_PATH 或现成 DEM，会按高程直减率对温度做订正，并同步重算固态降水。\n"
-    "界面只展示 SWE；Snowmelt 和 QA 仍在后台计算并供下游模块使用。"
+    "静态输入：baseline/DEM.tif 和 baseline/流域边界.shp。\n"
+    "统一动态输入：raw/meteorology/daily_forcing/forcing_YYYYMMDD.npz。\n"
+    "模块输出：processed/M02_swe/rasters 与 tables。\n"
+    "当前模型输出 SWE 与融雪量，不生成没有算法依据的径流量。"
 )
 
 
@@ -64,11 +65,14 @@ def _business_date_to_context(business_date: str | None):
     if len(date_text) >= 10 and date_text[4] == "-" and date_text[7] == "-":
         year = int(date_text[:4])
         month = int(date_text[5:7])
-        day = int(date_text[8:10])
-        period = f"{year:04d}{month:02d}{day:02d}"
+        period = f"{year:04d}{month:02d}"
     else:
         period = date_text.replace("-", "") or DEFAULT_PERIOD
         month = int(period[4:6]) if len(period) >= 6 and period[4:6].isdigit() else int(DEFAULT_PERIOD[4:6])
+
+    for context in iter_raw_run_contexts():
+        if context.period == period and _swe_raw_input_paths(context):
+            return context
 
     if 3 <= month <= 5:
         period_name = "融雪模拟"
@@ -77,6 +81,110 @@ def _business_date_to_context(business_date: str | None):
     else:
         period_name = "日尺度模拟"
     return default_run_context(period=period, period_name=period_name)
+
+
+def _entry_to_context(entry: dict):
+    standard_period = str(entry.get("standard_period") or "").strip()
+    if standard_period:
+        period = standard_period.replace("-", "")
+        month = int(period[4:6]) if len(period) >= 6 and period[4:6].isdigit() else int(DEFAULT_PERIOD[4:6])
+        for context in iter_raw_run_contexts():
+            if context.period == period and _swe_raw_input_paths(context):
+                return context
+        if 3 <= month <= 5:
+            period_name = "融雪模拟"
+        elif 6 <= month <= 9:
+            period_name = "汛期模拟"
+        else:
+            period_name = "日尺度模拟"
+        return default_run_context(period=period, period_name=period_name)
+    return _business_date_to_context(entry.get("business_date"))
+
+
+def _swe_raw_input_paths(context) -> list[Path]:
+    forcing_dir = raw_data_dir("meteorology", "daily_forcing")
+    pattern = f"forcing_{context.period}*.npz" if len(context.period) == 6 else f"forcing_{context.period}.npz"
+    return sorted(path for path in forcing_dir.glob(pattern) if path.is_file())
+
+
+def _require_swe_raw_input_paths(context) -> list[Path]:
+    paths = _swe_raw_input_paths(context)
+    if paths:
+        return paths
+    expected = raw_data_dir("meteorology", "daily_forcing") / f"forcing_{context.period}.npz"
+    raise FileNotFoundError(
+        "M02 SWE 缺少统一 raw 输入，不能写入 processed 标准成果。\n"
+        f"当前时段: {context.period}_{context.period_name}\n"
+        f"应提供统一 forcing 文件:\n{expected}"
+    )
+
+
+def _business_date_from_raw_inputs(context, raw_inputs: list[Path]) -> str:
+    return period_to_date(context.period)
+
+
+def _run_unified_swe_inputs(
+    *,
+    days_back: int = 1,
+    force_retrain: bool = False,
+    progress_callback=None,
+) -> dict:
+    if force_retrain and progress_callback:
+        progress_callback("统一离线运行复用当前已训练模型，不执行联网重训。")
+    forcing_dir = raw_data_dir("meteorology", "daily_forcing")
+    dem = baseline_dir() / "DEM.tif"
+    with rasterio.open(dem) as dataset:
+        dem_shape = (dataset.height, dataset.width)
+    compatible: list[Path] = []
+    skipped: list[str] = []
+    for source in sorted(forcing_dir.glob("forcing_*.npz")):
+        with np.load(source, allow_pickle=False) as archive:
+            shape = tuple(archive["temp_mean_c"].shape)
+        if shape == dem_shape:
+            compatible.append(source)
+        else:
+            skipped.append(f"{source.name}: {shape} != DEM {dem_shape}")
+    if not compatible:
+        raise RuntimeError("统一 daily_forcing 中没有与 baseline DEM 对齐的输入。")
+    selected = compatible[-max(1, int(days_back)):]
+    entries = []
+    for index, source in enumerate(selected, start=1):
+        token = source.stem.rsplit("_", 1)[-1]
+        context = default_run_context(period=token, period_name="独立离线运行")
+        swe_path = module_output_path("M02", context=context, output_index=0)
+        snowmelt_path = module_output_path("M02", context=context, output_index=1)
+        statistics_path = module_processed_dir("M02", "tables", create=True) / f"swe_statistics_{token}.csv"
+        if progress_callback:
+            progress_callback(f"正在重放 {source.name}（{index}/{len(selected)}）。")
+        result = run_unified_forcing_offline(
+            source,
+            dem,
+            swe_path,
+            snowmelt_path,
+            statistics_path,
+        )
+        entries.append(
+            {
+                "business_date": result["date"],
+                "source_status": "unified_raw_offline_replay",
+                "forcing_cycle": "local_cache",
+                "viirs_status": "missing" if result["viirs_missing"] else "cached",
+                "swe_mm": result["swe_mean_mm"],
+                "snowmelt_mm_day": result["snowmelt_mean_mm_day"],
+                "swe_raster": str(swe_path),
+                "snowmelt_raster": str(snowmelt_path),
+                "forcing_cache": str(source),
+                "standard_period": token,
+                "standard_period_name": "独立离线运行",
+                "diagnostics": {},
+            }
+        )
+    return {
+        "entries": entries,
+        "latest_entry": entries[-1],
+        "study_area_shp": str(baseline_dir() / "流域边界.shp"),
+        "skipped_inputs": skipped,
+    }
 
 
 def _copy_or_reproject_continuous_raster(src_path: str | Path, dst_path: str | Path) -> Path:
@@ -570,23 +678,23 @@ class SWEWidget(QWidget):
 
     def run_update_latest(self) -> None:
         self._start_background_task(
-            target=swe_assessment.run_update_latest_swe,
+            target=_run_unified_swe_inputs,
             kwargs={"force_retrain": self.retrain_check.isChecked()},
-            start_message="开始更新最新 SWE 业务日（今天优先，不完整则自动回退到昨天）...",
-            success_message="最新 SWE 更新完成。",
+            start_message="开始重放统一 raw 中最新的可用 SWE forcing...",
+            success_message="最新统一 forcing 的 SWE 离线运行完成。",
             error_title="SWE 更新失败",
         )
 
     def run_backfill(self) -> None:
         days_back = self.backfill_days.value()
         self._start_background_task(
-            target=swe_assessment.run_backfill_swe,
+            target=_run_unified_swe_inputs,
             kwargs={
                 "days_back": days_back,
                 "force_retrain": self.retrain_check.isChecked(),
             },
-            start_message=f"开始回算最近 {days_back} 天的 SWE ...",
-            success_message=f"最近 {days_back} 天的 SWE 回算完成。",
+            start_message=f"开始重放统一 raw 中最近 {days_back} 个兼容 forcing ...",
+            success_message="统一 forcing 批量重放完成。",
             error_title="SWE 回算失败",
         )
 
@@ -607,24 +715,31 @@ class SWEWidget(QWidget):
 
     def _load_standard_results_from_processed(self) -> dict:
         entries = []
-        root = processed_dir()
-        for swe_path in sorted(root.glob("*/*/raster/*_M02_swe_mm.tif")):
-            period = swe_path.name.split("_", 1)[0]
-            runoff_path = swe_path.with_name(f"{period}_M02_runoff_mm.tif")
-            if not runoff_path.exists():
+        for context in iter_raw_run_contexts():
+            raw_inputs = _swe_raw_input_paths(context)
+            if not raw_inputs:
+                continue
+            swe_path = module_output_path("M02", context=context, output_index=0)
+            snowmelt_path = module_output_path("M02", context=context, output_index=1)
+            if not snowmelt_path.exists():
+                continue
+            if not swe_path.exists():
                 continue
             entries.append(
                 {
-                    "business_date": period_to_date(period),
+                    "business_date": _business_date_from_raw_inputs(context, raw_inputs),
                     "source_status": "standard_processed",
                     "forcing_cycle": "",
                     "viirs_status": "",
                     "swe_mm": float("nan"),
                     "snowmelt_mm_day": float("nan"),
                     "swe_raster": str(swe_path),
-                    "snowmelt_raster": str(runoff_path),
+                    "snowmelt_raster": str(snowmelt_path),
                     "standard_swe_raster": str(swe_path),
-                    "standard_runoff_raster": str(runoff_path),
+                    "standard_snowmelt_raster": str(snowmelt_path),
+                    "standard_period": context.period,
+                    "standard_period_name": context.period_name,
+                    "raw_input_files": [str(path) for path in raw_inputs],
                     "diagnostics": {},
                 }
             )
@@ -648,24 +763,23 @@ class SWEWidget(QWidget):
         return exported
 
     def _export_standard_entry(self, entry: dict) -> dict[str, str]:
-        context = _business_date_to_context(entry.get("business_date"))
+        context = _entry_to_context(entry)
+        raw_inputs = _require_swe_raw_input_paths(context)
         swe_source = entry.get("swe_raster")
-        runoff_source = entry.get("snowmelt_raster")
+        snowmelt_source = entry.get("snowmelt_raster")
         if not swe_source:
             raise ValueError("缺少 SWE 栅格路径。")
-        if not runoff_source:
-            raise ValueError("缺少融雪/径流栅格路径。")
+        if not snowmelt_source:
+            raise ValueError("缺少融雪栅格路径。")
 
         swe_output = module_output_path("M02", context=context, output_index=0)
-        runoff_output = module_output_path("M02", context=context, output_index=1)
-        _copy_or_reproject_continuous_raster(swe_source, swe_output)
-        _copy_or_reproject_continuous_raster(runoff_source, runoff_output)
+        snowmelt_output = module_output_path("M02", context=context, output_index=1)
+        if Path(swe_source).resolve() != swe_output.resolve():
+            _copy_or_reproject_continuous_raster(swe_source, swe_output)
+        if Path(snowmelt_source).resolve() != snowmelt_output.resolve():
+            _copy_or_reproject_continuous_raster(snowmelt_source, snowmelt_output)
 
-        source_files = [
-            swe_source,
-            runoff_source,
-            entry.get("forcing_cache", ""),
-        ]
+        source_files = [*raw_inputs, baseline_dir() / "DEM.tif"]
         write_metadata_sidecar(
             swe_output,
             module_code="M02",
@@ -680,12 +794,15 @@ class SWEWidget(QWidget):
                 "swe_mm": entry.get("swe_mm"),
                 "source_status": entry.get("source_status"),
                 "viirs_status": entry.get("viirs_status"),
+                "raw_input_files": [str(path) for path in raw_inputs],
+                "model_weight": MODEL_PATH,
+                "threshold_or_config": {"mode": "offline_unified_forcing_replay"},
             },
         )
         write_metadata_sidecar(
-            runoff_output,
+            snowmelt_output,
             module_code="M02",
-            field="runoff",
+            field="snowmelt",
             source_files=source_files,
             extra={
                 "scheme": context.scheme,
@@ -695,12 +812,16 @@ class SWEWidget(QWidget):
                 "business_date": entry.get("business_date"),
                 "snowmelt_mm_day": entry.get("snowmelt_mm_day"),
                 "source_status": entry.get("source_status"),
+                "raw_input_files": [str(path) for path in raw_inputs],
+                "model_weight": MODEL_PATH,
+                "threshold_or_config": {"mode": "offline_unified_forcing_replay"},
+                "runoff_generated": False,
             },
         )
         mark_module_complete(context, "M02")
         entry["standard_swe_raster"] = str(swe_output)
-        entry["standard_runoff_raster"] = str(runoff_output)
+        entry["standard_snowmelt_raster"] = str(snowmelt_output)
         return {
             "swe": str(swe_output),
-            "runoff": str(runoff_output),
+            "snowmelt": str(snowmelt_output),
         }

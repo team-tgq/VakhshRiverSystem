@@ -1,10 +1,20 @@
 # algorithms/segformer_service/service_runner.py
+from __future__ import annotations
+
 import os
 import subprocess
 from .service_config import TASKS, RUNTIME_DIR, SEGFORMER_PYTHON
 
 
-def run_segformer_service(task_key: str, image_path: str, device: str = "cuda:0"):
+def run_segformer_service(
+    task_key: str,
+    image_path: str,
+    device: str = "cuda:0",
+    *,
+    overlay_path: str | None = None,
+    mask_path: str | None = None,
+    meta_path: str | None = None,
+):
     if task_key not in TASKS:
         raise ValueError(f"未知任务: {task_key}")
 
@@ -22,9 +32,11 @@ def run_segformer_service(task_key: str, image_path: str, device: str = "cuda:0"
         raise FileNotFoundError(f"未找到推理脚本: {infer_script}")
 
     image_name = os.path.splitext(os.path.basename(image_path))[0]
-    result_image = os.path.join(task["output_dir"], f"{image_name}_{task_key}_overlay.png")
-    result_mask = os.path.join(task["output_dir"], f"{image_name}_{task_key}_mask.png")
-    result_json = os.path.join(task["output_dir"], f"{image_name}_{task_key}_meta.json")
+    result_image = overlay_path or os.path.join(task["output_dir"], f"{image_name}_{task_key}_overlay.png")
+    result_mask = mask_path or os.path.join(task["output_dir"], f"{image_name}_{task_key}_mask.png")
+    result_json = meta_path or os.path.join(task["output_dir"], f"{image_name}_{task_key}_meta.json")
+    for output in (result_image, result_mask, result_json):
+        os.makedirs(os.path.dirname(os.path.abspath(output)), exist_ok=True)
 
     cmd = [
         SEGFORMER_PYTHON,

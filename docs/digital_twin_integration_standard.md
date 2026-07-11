@@ -1,260 +1,244 @@
-# 瓦赫什流域数字孪生系统集成整改实施说明
+# 瓦赫什流域统一数据与独立模块集成标准
 
-本文档依据《瓦赫什流域河流域数字孪生系统集成整改规范（初步）》整理，用于约束本仓库后续模块对接、数据目录、字段单位、页面演示顺序和样例数据组织。
+本文档定义当前阶段唯一有效的数据目录、来源标记、插件路径接口、模块输入输出和验收规则。旧的“方案 -> 时段 -> raster/table”结构不再使用。
 
-## 1. 整改目标
+## 1. 当前范围
 
-当前系统整改要解决五类问题：
+当前只要求以下模块使用各自已有的真实、公开或原生验证数据独立运行：
 
-- 各模块地图坐标、流域范围和时间范围不统一，三维图层叠加错位。
-- 文件格式、参数单位和命名不统一，模块输出无法被下游模块直接读取。
-- 外地参考数据和瓦赫什流域正式数据混算，导致结果不合理。
-- 前后算法因果关系不清晰，无法说明先算哪个、后算哪个。
-- 页面顺序不符合流域业务逻辑，演示过程不连贯。
+- M01 SegFormer 积雪/水体识别
+- M02 雪水当量估算
+- M04 淹没区识别
+- M05 RAFT 光流测速
+- M06 积雪状态识别
+- M07 洪涝灾害风险等级评估
+- M08 水资源分配
+- M09 库区水量估算
 
-本次已在项目中落地：
+本阶段不建立模块间输入输出关系，不统一业务年份，不定义调度工况。M03 洪水演进源码和 Unity build 保留，但不运行、不生成输入输出，也不得写入 `processed`。
 
-- `app/digital_twin_standard.py`：统一 CRS、时间、字段单位、模块链路和成果目录工具。
-- `data/瓦赫什流域孪生数据/`：正式真实数据目录，由 `tools/prepare_real_twin_data.py` 在本地生成，不进入 Git。
-- `sample_data/瓦赫什流域孪生数据/`：轻量样例数据树，只演示 baseline/raw/processed 目录结构，不得作为真实计算数据。
-- 插件加载顺序：按 M01/M06/M02/M03/M09/M08/M07/M04/M05 的业务链路排序。
+## 2. 强制原则
 
-## 2. 全局数据规范
+1. `baseline` 只保存固定公共基准数据。
+2. `raw` 按数据类型组织，不能按模块编号建立一级目录。
+3. `processed` 按模块组织，只保存算法实际运行结果。
+4. 正式模块不得从 `algorithms/*/data` 读取；该位置只能作为迁移来源或只读备份。
+5. 同一份 raw 数据只保留一个正式副本，通过元数据记录消费模块。
+6. 禁止联网下载、mock、随机、占位、空文件和结果改名冒充运行。
+7. 缺少输入或算法未实现时，保留缺项并报告，不生成“看起来完整”的成果。
+8. `processed` 不保存 raw 副本、权重、缓存、日志、临时帧或说明文档。
+9. 所有正式文件必须具有可追溯的 `.meta.json`。
+10. 所有插件必须使用统一路径 API，不得硬编码项目绝对路径。
 
-### 2.1 空间规范
-
-- 统一投影坐标系：`WGS84 UTM 42N`，EPSG 编码为 `EPSG:32642`。
-- 所有栅格、矢量和三维展示成果必须裁剪到瓦赫什河流域边界。
-- 基础 DEM 只保留一份，放在 `baseline/DEM.tif`，所有模块共用，不允许模块各自携带不同底图。
-
-### 2.2 时间规范
-
-- 计算时间步长：逐日。
-- 统一研究时段：`2005-2017`。
-- 时间字段统一命名为 `date`。
-- 日期格式统一为 `YYYY-MM-DD`。
-
-### 2.3 文件格式规范
-
-- 栅格成果：GeoTIFF，扩展名 `.tif`，必须带 CRS 和仿射变换。
-- 水文时序表：CSV，扩展名 `.csv`，时间字段为 `date`。
-- 边界和河网：正式数据使用 Shapefile，样例数据同时保留 `.prj` 文件。
-- 每个模型成果必须同时生成 `*.meta.json` 旁路元数据，记录 CRS、单位、来源模块和来源文件。
-- 每个方案时段目录计算完成后写入 `finish.tag`，供 Qt 或三维展示模块监听。
-
-### 2.4 正式数据与参考数据隔离
-
-- `baseline/`：固定基准数据，只读，不带时间和工况。
-- `raw/`：瓦赫什流域原始观测数据，按年份和时段组织。
-- `processed/`：各模块成果数据，按方案和时段组织。
-- 演示参考数据不得混入正式计算目录。若需要保留参考数据，应单独放在 `reference/` 或在文件名、元数据中标明 `demo_only=true`。
-- 真实数据接入顺序：优先使用本地已有真实数据；本地没有标准 raw 时，再在 2005-2017 研究期内选择可追溯公开数据下载。
-- `200503_哨兵影像.tif` 不能作为真实 Sentinel 数据使用；Sentinel-1/2 在 2005 年尚无对应观测。若业务必须覆盖 2005 年，应使用 Landsat、MODIS 等当年存在的真实数据源，并在文件名或元数据中写清来源。
-
-## 3. 标准目录结构
+## 3. 目录规范
 
 ```text
-瓦赫什流域孪生数据/
+data/瓦赫什流域孪生数据/
 ├─ baseline/
-│  ├─ 流域边界.shp
-│  ├─ 河网.shp
-│  ├─ 水库边界.shp
-│  └─ DEM.tif
+│  ├─ DEM.tif
+│  ├─ 流域边界.*
+│  ├─ 河网.*
+│  └─ 水库边界.*
 ├─ raw/
-│  ├─ YYYYMM_融雪期/
-│  │  ├─ YYYYMM_哨兵影像.tif
-│  │  ├─ YYYYMM_SAR影像.tif
-│  │  ├─ YYYYMM_逐日气象.csv
-│  │  └─ YYYYMM_水库参数.csv
-│  └─ YYYYMM_汛期/
-│     ├─ YYYYMM_哨兵影像.tif
-│     ├─ YYYYMM_SAR影像.tif
-│     ├─ YYYYMM_逐日气象.csv
-│     └─ YYYYMM_水库参数.csv
+│  ├─ remote_sensing/
+│  │  ├─ optical_rgb/
+│  │  │  ├─ segformer_snow/{val,test}/{images,masks}/
+│  │  │  └─ segformer_water/{val,test}/{images,masks}/
+│  │  ├─ sentinel1_sar/inundation_weak_labeled/
+│  │  ├─ sentinel2_multispectral/inundation_hand_labeled/
+│  │  └─ gee/snow_state/
+│  ├─ meteorology/
+│  │  ├─ temperature/
+│  │  ├─ precipitation/
+│  │  ├─ solid_precipitation/
+│  │  └─ daily_forcing/
+│  ├─ land_surface/
+│  │  ├─ soil_moisture/
+│  │  └─ land_cover/
+│  ├─ snow_hydrology/
+│  │  ├─ previous_swe_state/
+│  │  ├─ snow_cover/
+│  │  └─ snow_density/
+│  ├─ reservoir/
+│  │  ├─ parameters/
+│  │  ├─ observations/
+│  │  └─ hypsometry/
+│  ├─ socioeconomic/
+│  │  ├─ population/
+│  │  ├─ industry/
+│  │  ├─ agriculture/
+│  │  └─ water_demand/
+│  ├─ configuration/water_allocation/
+│  │  ├─ supply/
+│  │  ├─ demand/
+│  │  ├─ crops/
+│  │  └─ decision_weights/
+│  └─ video/river_velocity/
 └─ processed/
-   ├─ scheme01_常规调度工况/
-   │  ├─ YYYYMM_融雪模拟/
-   │  │  ├─ raster/
-   │  │  ├─ table/
-   │  │  └─ finish.tag  # 模块真实运行完成后生成
-   │  └─ YYYYMM_汛期模拟/
-   │     ├─ raster/
-   │     ├─ table/
-   │     └─ finish.tag  # 模块真实运行完成后生成
-   └─ scheme02_优化分水工况/
-      └─ YYYYMM_融雪模拟/
-         ├─ raster/
-         ├─ table/
-         └─ finish.tag  # 模块真实运行完成后生成
+   ├─ M01_segformer/
+   ├─ M02_swe/
+   ├─ M04_inundation/
+   ├─ M05_raft/
+   ├─ M06_snow_state/
+   ├─ M07_flood_risk/
+   ├─ M08_water_allocation/
+   └─ M09_reservoir_estimation/
 ```
 
-当前仓库脚本在本机未发现标准 raw 时，默认用 `--fallback-year 2017` 生成 `201703_融雪期` 与 `201707_汛期` 两个真实公开数据时段；这只是自动下载示例，不是目录规范指定年份。
+不存在的 test 数据不得补造，也不要创建空 test 目录。允许某种数据类型当前没有文件，此时不创建空目录冒充已接入。
 
-## 4. 字段与单位
+## 4. 数据真实性和用途
 
-| 指标名称 | 字段名 | 统一单位 |
+| 类型 | 当前数据 | 允许表述 |
 | --- | --- | --- |
-| 积雪深度 | `snow_depth` | `m` |
-| 积雪覆盖率 | `snow_cover` | `0-1` |
-| 雪密度 | `snow_density` | `g/cm3` |
-| 雪水当量 | `swe` | `mm` |
-| 径流深度 | `runoff` | `mm` |
-| 洪水水深 | `flood_depth` | `m` |
-| 河道流量 | `discharge` | `m3/s` |
-| 库容 | `storage` | `万m3` |
-| 下泄流量 | `outflow` | `m3/s` |
+| 模块测试数据 | 2026-05 清水河道流速测试视频 | 非现场、非现地实测视频 |
+| 公开或官方数据 | 气象、降水、土壤湿度、土地覆盖、GEE 产品 | 按 sidecar 中实际机构或产品来源描述 |
+| 模块原生验证集 | SegFormer snow/water、Bolivia S1、India S2 | 模块验证数据，不是瓦赫什业务数据 |
+| 用户配置 | M08/M09 参数 CSV | 用户配置或算法参数，不是观测 |
+| 来源未完全核实 | M09 原模块 2022 面积记录等 | unverified/module-native validation，不得写成实测 |
 
-## 5. 模块调用关系
+除视频外，任何文件出现 `is_field_observation=true` 都是错误。GEE 输出属于遥感产品，不是现场采样。
 
-### 5.1 主线链路
+## 5. 模块契约
 
-```text
-baseline/DEM.tif + baseline/流域边界.shp
-        ↓
-M01 积雪水体识别
-        ↓
-M06 积雪状态分类
-        ↓
-M02 雪水当量计算
-        ↓
-M03 洪水演进汇流
-        ├─→ M09 水库库容计算 → M08 水资源分配
-        └─→ M07 洪涝风险评估
-```
+### 5.1 M01 SegFormer
 
-### 5.2 校核支路
+- 输入：`raw/remote_sensing/optical_rgb/segformer_{snow,water}/`。
+- 环境：`E:/anaconda/envs/segformer/python.exe`。
+- 输出：每张输入对应一个 mask 和 overlay；有有效真值时才计算指标。
+- 约束：保持现有模型、权重、预处理、推理和界面效果。不得默认使用临时下载的 Sentinel 数据。
+- 已知输入问题：water val 中 8 个原标签是零字节文件，不能补造，因此只推理、不计指标。
 
-```text
-M04 SAR卫星淹没提取 → 实测淹没范围 → 校核 M07
-M05 视频流速监测     → 实测流速数据 → 校准 M03
-```
+### 5.2 M06 积雪状态
 
-### 5.3 标准输入输出
+- 输入：`raw/remote_sensing/gee/snow_state/*.tif`。
+- 输出：`snow_type`、确定性 `snow_density` 和统计表。
+- 必须记录波段、编码、dtype、CRS、NoData 和日期。
+- 当前雪密度来自状态类别映射，不是实测雪密度。
 
-| 编号 | 模块 | 输入 | 输出 | 下游 |
-| --- | --- | --- | --- | --- |
-| M01 | 积雪水体识别 | DEM、流域边界、哨兵影像 | `M01_snow_depth_m.tif`、`M01_snow_cover.tif`、积雪面积统计表 | M06、M02 |
-| M06 | 积雪状态分类 | M01 积雪成果、DEM | `M06_snow_type.tif`、`M06_snow_density_gcm3.tif` | M02 |
-| M02 | 雪水当量计算 | M01、M06、逐日气象 | `M02_swe_mm.tif`、`M02_runoff_mm.tif` | M03 |
-| M03 | 洪水演进汇流 | `M02_runoff_mm.tif` | `M03_discharge.csv`、`M03_flood_depth_m.tif`、`M03_inundation.tif` | M07、M09 |
-| M09 | 水库库容计算 | `M03_discharge.csv` | `M09_storage.csv`、`M09_outflow.csv` | M08 |
-| M08 | 水资源分配 | M09 库容、下泄流量 | `M08_分水方案统计表.csv` | 无 |
-| M07 | 洪涝风险评估 | M03 洪水成果、M04 校核成果 | `M07_洪涝风险分区图.tif` | 无 |
-| M04 | SAR卫星淹没提取 | SAR 影像 | `实测_淹没范围.tif`、淹没面积统计报表 | 校核 M07 |
-| M05 | 视频流速监测 | 河道视频 | `实测_流速数据.csv` | 校准 M03 |
+### 5.3 M02 雪水当量
 
-## 6. 页面板块与插件顺序
+- 输入：统一 daily forcing 和 `baseline/DEM.tif`，字段以代码真实契约为准。
+- 输出：SWE、Snowmelt 和统计表。
+- 当前算法没有径流计算逻辑，禁止生成 runoff。
+- forcing 与 DEM 网格不一致时跳过并报告，禁止静默拉伸。
 
-主程序当前按以下业务顺序加载插件：
+### 5.4 M09 库区水量估算
 
-1. SegFormer 专题识别（M01）
-2. 积雪状态识别（M06）
-3. 雪水当量估算（M02）
-4. 洪水演进与汇流模拟（M03）
-5. 库区水量估算（M09）
-6. 水资源分配（M08）
-7. 洪涝风险评估（M07）
-8. 淹没区监测（M04 校核）
-9. RAFT 光流测速（M05 校核）
+- 独立运行，不读取 M03。
+- `reservoir_parameters.csv`：`reservoir_id,reservoir_name,parameter,value,unit,source`。
+- `reservoir_observations.csv`：`date,reservoir_id,sensor,water_level_m,surface_area_km2,source,quality_status`。
+- `reservoir_hypsometry.csv`：`reservoir_id,elevation_m,area_km2,storage_mcm`。
+- 输出：`reservoir_storage.csv` 和 `estimation_summary.json`。
+- 当前算法不计算独立出库流量，因此不生成 outflow。
 
-展示逻辑应按“基础数据标准化 -> 遥感解译 -> SWE 与融雪径流 -> 洪水汇流 -> 水库调度与风险评估 -> 监测对比 -> 三维成果展示”展开。
+### 5.5 M08 水资源分配
 
-## 7. 模块负责人对接要求
+- 独立运行，不读取 M09 或任何其他 processed 成果。
+- 配置文件必须完整恢复界面，界面修改后可回写 CSV。
+- `global_supply_config.csv`：全局时段和初始供水。
+- `monthly_inflow.csv`：1-12 月显式入流。
+- `demand_parameters.csv`：人口、城镇化、GDP、产业和需水参数。
+- `crops.csv`：作物、生育期、面积、产量、价格和 Kc。
+- `decision_weights.csv`：偏好、部门和水电权重。
+- 缺少月入流时直接失败，禁止使用固定 `500 m3/s` 回退。
+- 输出：`allocation_plan.csv` 和 `allocation_summary.csv`。
 
-- 输出文件必须写入 `processed/{scheme}_{工况}/{period}_{模拟时段}/raster` 或 `table`。
-- 不允许模块直接读取其他模块的临时输出目录；只能读取 `processed/` 中的正式成果。
-- 输出字段必须使用本文档统一字段名和单位。
-- 栅格必须使用 `EPSG:32642`，并裁剪到 `baseline/流域边界.shp`。
-- 每个输出文件必须调用 `app.digital_twin_standard.write_metadata_sidecar()` 或等价工具写入旁路元数据。
-- 每个方案时段完成后调用 `app.digital_twin_standard.write_finish_tag()` 写入完成标记。
-- 模块插件应优先调用 `app.digital_twin_standard.module_output_path()`、`write_standard_csv()` 和 `mark_module_complete()`，避免各模块自行拼接目录导致成果无法互通。
+### 5.6 M07 洪涝风险
 
-标准成果写入示例：
+- 输入：降水、土壤湿度、土地覆盖、DEM、河网和流域边界。
+- 当前独立运行，不读取 M03 或 M04。
+- 输出：风险指数、五级风险栅格、权重、土地利用统计和 HTML 地图。
+
+### 5.7 M04 淹没区识别
+
+- 输入：原模块的 Sentinel-1 SAR 弱标注样例和 Sentinel-2 多光谱手工标注样例。
+- 必须用 rasterio 检查波段、dtype、CRS 和范围，不能只依赖文件名。
+- 两类数据分别保存 mask 和 overlay。
+- Bolivia/India 样例不是瓦赫什数据，禁止命名为“瓦赫什实测淹没范围”。
+
+### 5.8 M05 RAFT
+
+- 输入：`raw/video/river_velocity/` 中完整清水河道测试视频。
+- 权重：`algorithms/raft/raft-sintel.pth`。
+- 必须处理完整视频，不能只处理前两帧或界面指定的少量帧。
+- CSV 字段至少包含 `frame_index,timestamp_s,velocity_px_frame,velocity_m_s,valid_pixel_count,confidence,source_video`。
+- 没有可信空间标定时 `velocity_m_s` 必须留空。
+
+## 6. 统一路径 API
 
 ```python
 from app.digital_twin_standard import (
-    infer_run_context_from_path,
-    mark_module_complete,
-    module_output_path,
-    period_to_date,
-    write_metadata_sidecar,
-    write_standard_csv,
+    ensure_raw_source_path,
+    module_processed_dir,
+    raw_data_dir,
 )
 
-context = infer_run_context_from_path(input_file)
-output_csv = module_output_path("M05", context=context)
-write_standard_csv(
-    output_csv,
-    fieldnames=["date", "period", "module_code", "velocity_m_s"],
-    rows=[{"date": period_to_date(context.period), "period": context.period, "module_code": "M05", "velocity_m_s": 1.23}],
-)
-write_metadata_sidecar(output_csv, module_code="M05", field="velocity", source_files=[input_file])
-mark_module_complete(context, "M05")
+input_dir = raw_data_dir("remote_sensing", "sentinel1_sar", "inundation_weak_labeled")
+input_file = ensure_raw_source_path(input_dir / "example.tif")
+mask_dir = module_processed_dir("M04", "sentinel1_sar_weak", "masks", create=True)
 ```
 
-当前已完成标准成果自动导出的插件：
+`ensure_raw_source_path()` 会拒绝统一 raw 之外的正式输入。`module_processed_dir()` 会把模块成果限制到自己的 processed 目录。
 
-- `M01 SegFormer专题识别`：积雪覆盖 GeoTIFF 可同步写入 `raster/{period}_M01_snow_cover.tif` 与 `table/{period}_M01_积雪面积统计表.csv`，必要时重投影到 `EPSG:32642`，并写入旁路元数据。普通 png/jpg 推理结果因缺少 CRS，只保留界面预览结果，不进入正式 GIS 成果链路；雪深必须由真实雪深模型或带 CRS 的雪深产品生成，不能由积雪覆盖默认值伪造。
-- `M06 积雪状态识别`：GEE 双波段 GeoTIFF 下载到本地后，可在插件中同步写入 `raster/{period}_M06_snow_type.tif` 与 `raster/{period}_M06_snow_density_gcm3.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。当前雪密度由 `Snow_State` 类别映射生成，真实雪密度模型确认后可替换。
-- `M02 雪水当量估算`：更新最新 SWE 或加载已有结果后，自动写入 `raster/{period}_M02_swe_mm.tif` 与 `raster/{period}_M02_runoff_mm.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
-- `M03 洪水演进与汇流模拟`：可将外部汇流模型生成的流量 CSV、水深 GeoTIFF 和模拟淹没 GeoTIFF 同步写入 `table/{period}_M03_discharge.csv`、`raster/{period}_M03_flood_depth_m.tif`、`raster/{period}_M03_inundation.tif`，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
-- `M04 SAR/遥感淹没区监测`：输入 GeoTIFF 时自动写入 `raster/{period}_实测_淹没范围.tif` 和 `table/{period}_淹没面积统计报表.xlsx`，并写入旁路元数据与 `finish.tag`。普通 png/jpg 因缺少 CRS，只保留界面预览结果，不进入正式 GIS 成果链路。
-- `M05 RAFT 光流测速`：自动写入 `table/{period}_实测_流速数据.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`method`、`velocity_m_s`、`mean_flow_direction_deg`、`fps`、`frame_count`、`valid_pairs`。
-- `M09 库区水量估算`：自动写入 `table/{period}_M09_storage.csv`，其中 storage 记录水位/面积/库容。`table/{period}_M09_outflow.csv` 必须等真实下泄流量观测或调度模型接入后再生成，不写缺测占位表。
-- `M07 洪涝风险评估`：自动写入 `raster/{period}_M07_洪涝风险分区图.tif`，优先采用五级风险等级栅格，必要时重投影到 `EPSG:32642`，并写入旁路元数据与 `finish.tag`。
-- `M08 水资源分配`：自动写入 `table/{period}_M08_分水方案统计表.csv`，字段包含 `date`、`period`、`scheme`、`module_code`、`time_scale`、`sector`、`demand_million_m3`、`surface_release_million_m3`、`groundwater_million_m3`、`received_million_m3`、`shortage_million_m3`、`satisfaction_ratio_pct`。
+## 7. 元数据
 
-## 8. 数据目录校验
+raw sidecar 至少包含：
 
-仓库提供了轻量校验脚本，用于检查样例或正式目录是否满足本规范：
+```text
+data_type, dataset_name, source_files, source_origin, consumer_modules,
+split, sensor, bands, dtype, crs, date, is_module_native, checksum, created_at
+```
+
+processed sidecar 至少包含：
+
+```text
+module_code, output_type, source_files, model_weight, threshold_or_config,
+shape, dtype, crs, checksum, created_at
+```
+
+processed 的 `source_files` 必须指向本次实际使用的 baseline/raw 文件，不能指向另一个模块的 processed。模型权重单独记录到 `model_weight`。
+
+## 8. 数据准备和运行
 
 ```bash
-python tools/prepare_real_twin_data.py --resolution-m 1000
-python tools/prepare_real_twin_data.py --local-raw-root "D:/path/to/已有真实raw" --fallback-year 2017
+# 只生成迁移和删除审计清单
+python tools/prepare_real_twin_data.py --audit-only
+
+# 迁移本地原生数据并清理已确认旧结构
+python tools/prepare_real_twin_data.py --migrate
+
+# 独立运行八个模块
+python tools/prepare_real_twin_data.py --run-modules --modules "M01,M06,M02,M09,M08,M07,M04,M05"
+```
+
+脚本禁止联网；迁移时先复制并核对 SHA-256，再清理旧时段/方案副本。临时下载的 Sentinel 数据及其低质量派生成果应按审计清单删除，模型权重、源码、原生验证集、GEE 产品、清水河道测试视频和 baseline 必须保留。
+
+## 9. 三轮验收
+
+```bash
 python tools/validate_twin_data.py --stage baseline-raw
 python tools/validate_twin_data.py --stage full
-python tools/validate_twin_data.py "D:/path/to/瓦赫什流域孪生数据"
 ```
 
-`prepare_real_twin_data.py` 会优先使用本地真实 `raw`，本地缺失时再下载研究期内可追溯公开数据。`processed` 只能由各模块真实运行后写入；若缺少真实输入或模块尚未运行，应保持成果缺失并由 `full` 校验报出，不允许用批处理脚本伪造 M01-M09 成果。`baseline-raw` 阶段只校验基础数据和原始观测数据；`full` 阶段要求各模块已经写入真实 `processed` 成果、旁路元数据和 `finish.tag`。
+第一轮检查根目录、baseline、raw 分类、文件非空、sidecar、SHA-256 和来源标记。
 
-主程序也提供了界面校验入口：
+第二轮检查八个模块目录、预期成果、真实来源链和 `finish.tag`，并确认没有 M03、方案目录或跨模块 processed 输入。
 
-1. 打开 `数据整理与流程总览` 标签页。
-2. 在“数据根目录”中选择正式数据目录。
-3. 点击“校验数据目录”。
-4. 若出现错误，先修正目录结构、CRS、CSV 字段或 `finish.tag`，再进入业务模块。
+第三轮实际打开 GeoTIFF、图片、CSV 和视频，检查 CRS、NoData、有效像元、尺寸对应、字段、行数和完整视频帧对关系。不能用“文件存在”代替运行验证。
 
-正式数据根目录可在 `config.py` 中设置：
+报告位于：
 
-```python
-TWIN_DATA_ROOT = "D:/path/to/瓦赫什流域孪生数据"
-```
+- `reports/data_architecture_migration_audit.json`
+- `reports/independent_module_run_report.json`
+- `reports/twin_data_validation_report.json`
 
-也可在启动前通过环境变量覆盖：
+## 10. 当前质量限制
 
-```powershell
-$env:VAKHSH_TWIN_DATA_ROOT = "D:/path/to/瓦赫什流域孪生数据"
-python main.py
-```
+1. M02 `2017-07-01` 的 SWE 和 Snowmelt 是全零模型结果，验证器保留常值警告。
+2. M02 `forcing_20260525.npz` 为 `9×21`，与 `521×1051` DEM 不一致，当前跳过。
+3. M04 两幅 S1 样例淹没比例约 `99.98%`，当前 7 通道模型对 2 波段 SAR 的适配质量较差。
+4. M09 的 2022 面积记录缺少底层影像，只能作为原模块验证记录。
+5. M05 没有空间标定，只能报告像素位移速度。
 
-当前校验内容包括：
-
-- `baseline/raw/processed` 三类目录是否存在。
-- baseline 是否包含流域边界、河网、水库边界和 DEM。
-- baseline 矢量文件是否为 `EPSG:32642`，河网、水库边界是否位于流域边界范围内，DEM 和 raw 影像是否覆盖流域范围。
-- raw 是否按 `YYYYMM_业务时段` 或 `YYYYMMDD_业务时段` 组织，并检查目录内栅格、表格等文件。
-- processed 是否按“方案 -> 时段 -> raster/table”组织；时段名称动态扫描，不限定旧样例或自动下载示例中的具体年份。
-- GeoTIFF 坐标系是否为 `EPSG:32642`；baseline/raw 需要覆盖流域，processed 成果应裁剪或对齐到流域范围。
-- CSV 是否包含统一时间字段 `date`，日期是否为 `YYYY-MM-DD`，年份是否位于 2005-2017。
-- 栅格、表格和报表成果是否有 `.meta.json`，并声明坐标系、时间步长、时间字段、来源文件、模块编号、字段和单位；字段和单位必须与 `app.digital_twin_standard.STANDARD_FIELDS` 一致。
-- 正式数据目录不得混入 `demo_only=true` 的演示参考数据；仓库 `sample_data` 目录允许保留 `demo_only=true` 作为样例标识。
-- `finish.tag` 是否可读并包含完成模块列表。
-
-## 9. 待刘老师或模块负责人确认事项
-
-- M01 已支持把带 CRS 的积雪覆盖 GeoTIFF 同步为标准积雪覆盖和面积统计成果；雪深不再自动代理生成，必须等待真实雪深来源接入。是否需要同时把水体识别成果标准化输出给 M03 或 M07，仍需模块负责人确认。
-- M06 积雪状态识别已将 GEE 输出转换为 `snow_type` 和 `snow_density` 两个标准文件；其中雪密度当前为类别映射值，仍需确认是否替换为实测或独立模型雪密度。
-- M03 已支持把外部汇流模型成果同步到 `processed/` 标准目录；Unity 三维展示是否只读该目录，还是需要额外三维场景缓存目录，仍需和模块负责人确认。
-- M09 库区水量估算当前只生成 `M09_storage.csv`；真实下泄流量仍缺少可追溯来源，需要确认出库流量来源、单位和时间步长后再生成 `M09_outflow.csv`。
-- M04/M05 是否只做人工校核，还是要在界面中自动参与参数率定。
+这些限制必须在演示、报告和后续数据交付中保留，不能通过改名、填默认值或删除警告掩盖。

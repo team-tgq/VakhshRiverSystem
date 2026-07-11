@@ -401,6 +401,28 @@ def resolve_flood_input_paths(
     allow_legacy_dynamic: bool = True,
     auto_prepare_dynamic: bool = True,
 ) -> dict:
+    explicit_keys = (
+        "study_area_shp",
+        "dem_path",
+        "landcover_path",
+        "rivers_path",
+        "rain_path",
+        "soil_path",
+    )
+    explicit = {key: cfg.get(key) for key in explicit_keys}
+    if all(value and os.path.exists(value) for value in explicit.values()):
+        resolved_date = _extract_date_from_name(os.path.basename(str(explicit["rain_path"])))
+        requested = parse_target_date(target_date)
+        return {
+            **explicit,
+            "requested_target_date": requested.isoformat() if requested else None,
+            "resolved_target_date": resolved_date.isoformat() if resolved_date else None,
+            "dynamic_scale": "explicit-unified-raw",
+            "available_dynamic_dates": [resolved_date.isoformat()] if resolved_date else [],
+            "static_actions": [],
+            "dynamic_actions": [],
+        }
+
     resolved = {}
     resolved.update(resolve_static_inputs(cfg, auto_prepare=auto_prepare_static))
     resolved.update(

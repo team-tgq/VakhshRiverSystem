@@ -11,3 +11,10 @@ WINDOW_HEIGHT = 800
 # 也可通过环境变量 VAKHSH_TWIN_DATA_ROOT 临时覆盖。
 TWIN_DATA_ROOT = "data/瓦赫什流域孪生数据"
 TWIN_DATA_ENV_VAR = "VAKHSH_TWIN_DATA_ROOT"
+
+# 当前项目内的 Google Earth Engine 代理配置。
+# 这里只影响本项目 Python 进程，不会写入 Windows 全局环境变量。
+GEE_PROXY_ENABLED = True
+GEE_PROXY_URL = "http://127.0.0.1:7892"
+GEE_PROXY_NO_PROXY = "localhost,127.0.0.1,::1"
+GEE_OAUTH_TOKEN_URI = "https://accounts.google.com/o/oauth2/token"

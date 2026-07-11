@@ -2,87 +2,124 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
-from datetime import datetime
 import sys
+from collections import defaultdict
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
-
-import rasterio
-
-try:
-    import geopandas as gpd
-except Exception:  # pragma: no cover - optional runtime dependency
-    gpd = None
+from typing import Iterable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.digital_twin_standard import (  # noqa: E402
-    DATE_FIELD,
-    DATE_FORMAT,
+from app.digital_twin_standard import (
     DEFAULT_TWIN_DATA_ROOT,
-    MODULE_SPECS,
-    SAMPLE_TWIN_DATA_ROOT,
-    STANDARD_FIELDS,
-    STUDY_YEAR_END,
-    STUDY_YEAR_START,
-    TARGET_CRS,
-    TIME_STEP,
+    MODULE_DIRECTORY_NAMES,
+    RAW_DATA_CATEGORIES,
 )
 
 
-REQUIRED_BASELINE_FILES = (
-    "流域边界.shp",
-    "流域边界.shx",
-    "流域边界.dbf",
-    "流域边界.prj",
-    "河网.shp",
-    "河网.shx",
-    "河网.dbf",
-    "河网.prj",
-    "水库边界.shp",
-    "水库边界.shx",
-    "水库边界.dbf",
-    "水库边界.prj",
-    "DEM.tif",
-)
+REPORT_PATH = PROJECT_ROOT / "reports" / "twin_data_validation_report.json"
+EXPECTED_ROOT_DIRS = {"baseline", "raw", "processed"}
+ACTIVE_MODULES = ("M01", "M02", "M04", "M05", "M06", "M07", "M08", "M09")
+ACTIVE_MODULE_DIRS = {MODULE_DIRECTORY_NAMES[code]: code for code in ACTIVE_MODULES}
+META_SUFFIX = ".meta.json"
 
-REQUIRED_METADATA_KEYS = (
-    "file",
-    "module_code",
-    "field",
-    "unit",
-    "crs",
-    "time_step",
-    "date_field",
-    "date_format",
+RAW_REQUIRED_FIELDS = {
+    "data_type",
+    "dataset_name",
     "source_files",
-)
-
-BASELINE_RAW_METADATA_KEYS = (
-    "file",
-    "data_role",
-    "data_status",
-    "source_name",
-    "source_files",
+    "source_origin",
+    "consumer_modules",
+    "split",
+    "sensor",
+    "bands",
+    "dtype",
     "crs",
+    "date",
+    "is_module_native",
+    "checksum",
     "created_at",
-)
+}
+PROCESSED_REQUIRED_FIELDS = {
+    "module_code",
+    "output_type",
+    "source_files",
+    "model_weight",
+    "threshold_or_config",
+    "shape",
+    "dtype",
+    "crs",
+    "checksum",
+    "created_at",
+}
 
-BOUND_TOLERANCE_M = 1.0
-PY_DATE_FORMAT = "%Y-%m-%d"
-SIMULATED_STATUS_VALUES = {"demo", "demo_only", "mock", "sample", "simulated", "simulation"}
+EXPECTED_OUTPUTS = {
+    "M01": (
+        "snow/val/masks/*.png",
+        "snow/val/overlays/*.png",
+        "water/val/masks/*.png",
+        "water/val/overlays/*.png",
+        "validation_metrics.csv",
+    ),
+    "M02": (
+        "rasters/SWE_mm_*.tif",
+        "rasters/Snowmelt_mm_day_*.tif",
+        "tables/daily_basin_series.csv",
+    ),
+    "M04": (
+        "sentinel1_sar_weak/masks/*.png",
+        "sentinel1_sar_weak/overlays/*.png",
+        "sentinel2_optical_hand/masks/*.png",
+        "sentinel2_optical_hand/overlays/*.png",
+    ),
+    "M05": ("tables/frame_pair_velocity.csv",),
+    "M06": (
+        "rasters/*_snow_type.tif",
+        "rasters/*_snow_density_gcm3.tif",
+        "tables/*_snow_state_statistics.csv",
+    ),
+    "M07": (
+        "rasters/flood_risk_level.tif",
+        "rasters/flood_risk_index.tif",
+        "tables/landuse_risk_stats.csv",
+        "tables/final_weights.txt",
+        "tables/landuse_risk_summary.txt",
+        "visualizations/flood_risk_map.html",
+    ),
+    "M08": (
+        "tables/allocation_plan.csv",
+        "tables/allocation_summary.csv",
+    ),
+    "M09": (
+        "tables/reservoir_storage.csv",
+        "tables/estimation_summary.json",
+    ),
+}
 
 
+@dataclass
 class ValidationReport:
-    def __init__(self) -> None:
-        self.errors: list[str] = []
-        self.warnings: list[str] = []
-        self.checked: list[str] = []
+    root: str
+    stage: str
+    created_at: str = field(
+        default_factory=lambda: datetime.now().astimezone().isoformat(timespec="seconds")
+    )
+    checks: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    stats: dict = field(default_factory=dict)
+    rounds: dict = field(default_factory=dict)
+
+    @property
+    def success(self) -> bool:
+        return not self.errors
 
     def ok(self, message: str) -> None:
-        self.checked.append(message)
+        self.checks.append(message)
 
     def warn(self, message: str) -> None:
         self.warnings.append(message)
@@ -90,463 +127,583 @@ class ValidationReport:
     def error(self, message: str) -> None:
         self.errors.append(message)
 
+    def to_dict(self) -> dict:
+        return {**asdict(self), "success": self.success}
+
     def print(self) -> None:
-        print("=== 瓦赫什流域孪生数据校验 ===")
-        for item in self.checked:
-            print(f"[OK] {item}")
+        print(f"数据根目录: {self.root}")
+        print(f"验证阶段: {self.stage}")
+        print(f"检查通过: {len(self.checks)}")
+        print(f"警告: {len(self.warnings)}")
+        print(f"错误: {len(self.errors)}")
         for item in self.warnings:
             print(f"[WARN] {item}")
         for item in self.errors:
             print(f"[ERROR] {item}")
-        print(f"检查通过项: {len(self.checked)}")
-        print(f"警告: {len(self.warnings)}")
-        print(f"错误: {len(self.errors)}")
-
-    @property
-    def success(self) -> bool:
-        return not self.errors
+        print("验证结果: " + ("PASS" if self.success else "FAIL"))
 
 
-def _require_file(report: ValidationReport, path: Path, label: str) -> None:
-    if path.exists() and path.is_file():
-        report.ok(f"{label}: {path}")
-    else:
-        report.error(f"缺少文件 {label}: {path}")
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        while block := file.read(1024 * 1024):
+            digest.update(block)
+    return digest.hexdigest()
 
 
-def _require_dir(report: ValidationReport, path: Path, label: str) -> None:
-    if path.exists() and path.is_dir():
-        report.ok(f"{label}: {path}")
-    else:
-        report.error(f"缺少目录 {label}: {path}")
-
-
-def _check_tif_crs(report: ValidationReport, path: Path):
+def _is_under(path: Path, root: Path) -> bool:
     try:
-        with rasterio.open(path) as ds:
-            crs = ds.crs.to_string() if ds.crs else ""
-            if crs == TARGET_CRS:
-                report.ok(f"GeoTIFF CRS={TARGET_CRS}: {path.name}")
-                return ds.bounds
-            else:
-                report.error(f"GeoTIFF 坐标系不统一: {path}，当前 {crs or 'None'}，应为 {TARGET_CRS}")
-    except Exception as exc:
-        report.error(f"GeoTIFF 无法读取: {path} ({exc})")
-    return None
-
-
-def _check_vector_crs(report: ValidationReport, path: Path):
-    if gpd is None:
-        report.warn(f"未安装 geopandas，跳过矢量 CRS 校验: {path.name}")
-        return None
-
-    try:
-        gdf = gpd.read_file(path)
-    except Exception as exc:
-        report.error(f"矢量文件无法读取: {path} ({exc})")
-        return None
-
-    if gdf.empty:
-        report.error(f"矢量文件无要素: {path}")
-        return None
-
-    epsg = gdf.crs.to_epsg() if gdf.crs is not None else None
-    if epsg == 32642:
-        report.ok(f"矢量 CRS={TARGET_CRS}: {path.name}")
-    else:
-        report.error(f"矢量坐标系不统一: {path}，当前 {gdf.crs or 'None'}，应为 {TARGET_CRS}")
-        return None
-
-    return tuple(float(value) for value in gdf.total_bounds)
-
-
-def _bounds_within(inner, outer, tolerance: float = BOUND_TOLERANCE_M) -> bool:
-    return (
-        inner[0] >= outer[0] - tolerance
-        and inner[1] >= outer[1] - tolerance
-        and inner[2] <= outer[2] + tolerance
-        and inner[3] <= outer[3] + tolerance
-    )
-
-
-def _bounds_cover(outer, inner, tolerance: float = BOUND_TOLERANCE_M) -> bool:
-    return _bounds_within(inner, outer, tolerance)
-
-
-def _bounds_tuple(bounds) -> tuple[float, float, float, float]:
-    if hasattr(bounds, "left"):
-        return (float(bounds.left), float(bounds.bottom), float(bounds.right), float(bounds.top))
-    return tuple(float(value) for value in bounds)
-
-
-def _check_bounds_within_watershed(
-    report: ValidationReport,
-    path: Path,
-    bounds,
-    watershed_bounds: tuple[float, float, float, float] | None,
-) -> None:
-    if bounds is None or watershed_bounds is None:
-        return
-    inner = _bounds_tuple(bounds)
-    if _bounds_within(inner, watershed_bounds):
-        report.ok(f"范围位于流域边界内: {path.name}")
-    else:
-        report.error(
-            "数据范围超出流域边界: "
-            f"{path}，当前 {inner}，流域边界 {watershed_bounds}"
-        )
-
-
-def _check_bounds_cover_watershed(
-    report: ValidationReport,
-    path: Path,
-    bounds,
-    watershed_bounds: tuple[float, float, float, float] | None,
-) -> None:
-    if bounds is None or watershed_bounds is None:
-        return
-    outer = _bounds_tuple(bounds)
-    if _bounds_cover(outer, watershed_bounds):
-        report.ok(f"范围覆盖流域边界: {path.name}")
-    else:
-        report.error(
-            "数据范围未覆盖完整流域边界: "
-            f"{path}，当前 {outer}，流域边界 {watershed_bounds}"
-        )
-
-
-def _is_sample_root(root: Path) -> bool:
-    try:
-        return root.resolve() == SAMPLE_TWIN_DATA_ROOT.resolve()
-    except Exception:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
         return False
 
 
-def _check_year_in_study_range(report: ValidationReport, year: int, label: str) -> bool:
-    if STUDY_YEAR_START <= year <= STUDY_YEAR_END:
-        return True
-    report.error(f"时间超出统一研究时段 {STUDY_YEAR_START}-{STUDY_YEAR_END}: {label}")
-    return False
+def _payload_files(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    return sorted(
+        path
+        for path in root.rglob("*")
+        if path.is_file() and not path.name.endswith(META_SUFFIX) and path.name != "finish.tag"
+    )
 
 
-def _parse_date(report: ValidationReport, value: str, label: str):
+def _sidecar(path: Path) -> Path:
+    return path.with_suffix(path.suffix + META_SUFFIX)
+
+
+def _load_json(report: ValidationReport, path: Path) -> dict | None:
     try:
-        parsed = datetime.strptime(str(value).strip(), PY_DATE_FORMAT).date()
-    except Exception:
-        report.error(f"日期格式不统一，应为 {DATE_FORMAT}: {label}={value!r}")
-        return None
-    _check_year_in_study_range(report, parsed.year, f"{label}={value}")
-    return parsed
-
-
-def _check_period_token(report: ValidationReport, token: str, label: str) -> None:
-    if not token.isdigit() or len(token) not in (6, 8):
-        report.error(f"时段命名不规范，应为 YYYYMM 或 YYYYMMDD: {label}")
-        return
-
-    year = int(token[:4])
-    month = int(token[4:6])
-    if not 1 <= month <= 12:
-        report.error(f"时段月份不合法: {label}")
-        return
-    if not _check_year_in_study_range(report, year, label):
-        return
-
-    if len(token) == 8:
-        _parse_date(report, f"{token[:4]}-{token[4:6]}-{token[6:8]}", label)
-    else:
-        report.ok(f"时段位于统一研究时段: {label}")
-
-
-def _period_token_from_folder(report: ValidationReport, folder: Path, label: str) -> str | None:
-    token = folder.name.split("_", 1)[0]
-    if "_" not in folder.name:
-        report.error(f"{label} 文件夹命名不规范，应为 年月_时段名称: {folder}")
-        return None
-    _check_period_token(report, token, f"{label}/{folder.name}")
-    return token
-
-
-def _check_metadata_sidecar(
-    report: ValidationReport,
-    path: Path,
-    module_code: str | None = None,
-    *,
-    allow_demo_only: bool = True,
-    strict_module: bool = True,
-) -> None:
-    metadata_path = path.with_suffix(path.suffix + ".meta.json")
-    if not metadata_path.exists():
-        report.error(f"缺少元数据说明: {metadata_path}")
-        return
-
-    try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
-        report.error(f"元数据无法读取: {metadata_path} ({exc})")
-        return
-
-    required_keys = REQUIRED_METADATA_KEYS if strict_module else BASELINE_RAW_METADATA_KEYS
-    missing = [key for key in required_keys if key not in payload]
-    if missing:
-        if allow_demo_only and not strict_module:
-            report.warn(f"样例元数据为旧格式，仅作为模板保留: {metadata_path}，缺少 {missing}")
-            return
-        report.error(f"元数据缺少字段 {missing}: {metadata_path}")
-        return
-
-    if payload.get("file") != path.name:
-        report.error(f"元数据 file 与成果文件名不一致: {metadata_path}")
-        return
-    if payload.get("demo_only") is True and not allow_demo_only:
-        report.error(f"正式数据目录不能混入 demo_only=true 的演示数据: {metadata_path}")
-        return
-
-    if not strict_module:
-        if not isinstance(payload.get("source_files"), list) or not payload["source_files"]:
-            report.error(f"元数据 source_files 不能为空: {metadata_path}")
-            return
-        status = str(payload.get("data_status", "")).strip().lower()
-        if not allow_demo_only and status in SIMULATED_STATUS_VALUES:
-            report.error(f"正式数据目录不能混入模拟/演示数据状态: {metadata_path}，data_status={status}")
-            return
-        if payload.get("crs") not in (TARGET_CRS, "not_applicable"):
-            report.error(f"元数据 CRS 不统一: {metadata_path}，当前 {payload.get('crs')}，应为 {TARGET_CRS}")
-            return
-        report.ok(f"元数据说明完整: {metadata_path.name}")
-        return
-
-    if module_code and payload.get("module_code") != module_code:
-        report.error(f"元数据 module_code 不一致: {metadata_path}，应为 {module_code}")
-        return
-    field = str(payload.get("field", ""))
-    field_info = STANDARD_FIELDS.get(field)
-    if field_info is None:
-        report.error(f"元数据 field 未在全局字段表中定义: {metadata_path}，field={field}")
-        return
-    if payload.get("unit") != field_info["unit"]:
-        report.error(
-            f"元数据 unit 与全局字段表不一致: {metadata_path}，"
-            f"当前 {payload.get('unit')}，应为 {field_info['unit']}"
-        )
-        return
-    if payload.get("crs") != TARGET_CRS:
-        report.error(f"元数据 CRS 不统一: {metadata_path}，当前 {payload.get('crs')}，应为 {TARGET_CRS}")
-        return
-    if payload.get("time_step") != TIME_STEP:
-        report.error(f"元数据 time_step 不统一: {metadata_path}，应为 {TIME_STEP}")
-        return
-    if payload.get("date_field") != DATE_FIELD:
-        report.error(f"元数据 date_field 不统一: {metadata_path}，应为 {DATE_FIELD}")
-        return
-    if payload.get("date_format") != DATE_FORMAT:
-        report.error(f"元数据 date_format 不统一: {metadata_path}，应为 {DATE_FORMAT}")
-        return
-    if not isinstance(payload.get("source_files"), list) or not payload["source_files"]:
-        report.error(f"元数据 source_files 不能为空: {metadata_path}")
-        return
-    report.ok(f"元数据说明完整: {metadata_path.name}")
+        report.error(f"JSON 无法读取: {path}: {exc}")
+        return None
+    if not isinstance(payload, dict):
+        report.error(f"JSON 顶层必须是对象: {path}")
+        return None
+    return payload
 
 
-def _check_baseline_raw_metadata(
+def _check_sidecar(
     report: ValidationReport,
     path: Path,
     *,
-    allow_demo_only: bool,
-) -> None:
-    metadata_path = path.with_suffix(path.suffix + ".meta.json")
-    if allow_demo_only and not metadata_path.exists():
-        report.warn(f"样例数据缺少旁路元数据，仅作为模板保留: {metadata_path}")
+    kind: str,
+    expected_module: str | None = None,
+    root: Path,
+) -> dict | None:
+    metadata_path = _sidecar(path)
+    if not metadata_path.is_file():
+        report.error(f"缺少元数据 sidecar: {path}")
+        return None
+    metadata = _load_json(report, metadata_path)
+    if metadata is None:
+        return None
+
+    required = RAW_REQUIRED_FIELDS if kind == "raw" else PROCESSED_REQUIRED_FIELDS
+    missing = sorted(required - set(metadata))
+    if missing:
+        report.error(f"元数据字段缺失 {missing}: {metadata_path}")
+
+    expected_checksum = metadata.get("checksum")
+    actual_checksum = _sha256(path)
+    if expected_checksum != actual_checksum:
+        report.error(
+            f"checksum 不一致: {path}; metadata={expected_checksum}, actual={actual_checksum}"
+        )
+
+    if kind == "raw":
+        consumers = metadata.get("consumer_modules")
+        if not isinstance(consumers, list) or not consumers:
+            report.error(f"raw consumer_modules 必须为非空列表: {metadata_path}")
+        invalid_consumers = sorted(set(consumers or []) - set(ACTIVE_MODULES))
+        if invalid_consumers:
+            report.error(f"raw 包含非活动模块 consumer {invalid_consumers}: {metadata_path}")
+        is_field = bool(metadata.get("is_field_observation"))
+        if is_field and not _is_under(path, root / "raw" / "video" / "river_velocity"):
+            report.error(f"非河道视频被错误标记为现地实测: {metadata_path}")
+    else:
+        if metadata.get("module_code") != expected_module:
+            report.error(
+                f"processed module_code 错误: {metadata_path}; "
+                f"expected={expected_module}, actual={metadata.get('module_code')}"
+            )
+        sources = metadata.get("source_files")
+        if not isinstance(sources, list) or not sources:
+            report.error(f"processed source_files 必须为非空列表: {metadata_path}")
+        for source_text in sources or []:
+            if "://" in str(source_text):
+                continue
+            source = Path(source_text).expanduser()
+            if not source.exists():
+                report.error(f"processed 来源文件不存在: {metadata_path} -> {source}")
+                continue
+            if _is_under(source, root / "processed"):
+                report.error(f"独立模块不得读取其他 processed 成果: {metadata_path} -> {source}")
+            if not (_is_under(source, root / "raw") or _is_under(source, root / "baseline")):
+                report.error(f"processed 正式输入未统一到 raw/baseline: {metadata_path} -> {source}")
+
+        model_weight = metadata.get("model_weight")
+        if model_weight and not Path(model_weight).is_file():
+            report.error(f"模型权重不存在: {metadata_path} -> {model_weight}")
+    return metadata
+
+
+def _check_root_structure(report: ValidationReport, root: Path) -> None:
+    if not root.is_dir():
+        report.error(f"数据根目录不存在: {root}")
         return
-    _check_metadata_sidecar(report, path, allow_demo_only=allow_demo_only, strict_module=False)
+    children = {path.name for path in root.iterdir() if path.is_dir()}
+    extra_dirs = sorted(children - EXPECTED_ROOT_DIRS)
+    missing_dirs = sorted(EXPECTED_ROOT_DIRS - children)
+    if extra_dirs:
+        report.error(f"数据根目录存在非标准目录: {extra_dirs}")
+    if missing_dirs:
+        report.error(f"数据根目录缺少目录: {missing_dirs}")
+    root_files = sorted(path.name for path in root.iterdir() if path.is_file())
+    if root_files:
+        report.error(f"数据根目录不得直接放文件: {root_files}")
+
+    raw_root = root / "raw"
+    raw_dirs = {path.name for path in raw_root.iterdir() if path.is_dir()} if raw_root.exists() else set()
+    invalid_raw = sorted(raw_dirs - set(RAW_DATA_CATEGORIES))
+    if invalid_raw:
+        report.error(f"raw 一级目录必须是数据类型，发现: {invalid_raw}")
+    for directory in raw_root.rglob("*") if raw_root.exists() else []:
+        if directory.is_dir() and directory.name.lower() == "test":
+            if not _payload_files(directory):
+                report.error(f"不得创建空 test 目录冒充数据: {directory}")
+
+    processed_root = root / "processed"
+    processed_dirs = (
+        {path.name for path in processed_root.iterdir() if path.is_dir()}
+        if processed_root.exists()
+        else set()
+    )
+    invalid_processed = sorted(processed_dirs - set(ACTIVE_MODULE_DIRS))
+    if invalid_processed:
+        report.error(f"processed 一级目录必须是活动模块，发现: {invalid_processed}")
+    forbidden_tokens = ("scheme", "工况", "module_validation", "M03", "discharge")
+    for path in processed_root.rglob("*") if processed_root.exists() else []:
+        relative = path.relative_to(processed_root).as_posix()
+        if any(token.lower() in relative.lower() for token in forbidden_tokens):
+            report.error(f"processed 中残留旧方案、验证层或 M03 成果: {relative}")
+    report.ok("第一轮：根目录、raw 类型层和 processed 模块层结构检查完成")
 
 
-def _check_csv_date(report: ValidationReport, path: Path) -> None:
+def _check_baseline(report: ValidationReport, root: Path) -> None:
+    baseline = root / "baseline"
+    required = [baseline / "DEM.tif", baseline / "流域边界.shp", baseline / "河网.shp", baseline / "水库边界.shp"]
+    for path in required:
+        if not path.is_file() or path.stat().st_size == 0:
+            report.error(f"baseline 固定基准缺失或为空: {path}")
+            continue
+        if path.suffix.lower() == ".shp":
+            for suffix in (".dbf", ".shx", ".prj"):
+                companion = path.with_suffix(suffix)
+                if not companion.is_file() or companion.stat().st_size == 0:
+                    report.error(f"Shapefile 组件缺失或为空: {companion}")
+        if not _sidecar(path).is_file():
+            report.error(f"baseline 主文件缺少来源元数据: {_sidecar(path)}")
+    report.ok("第一轮：baseline 固定基准检查完成")
+
+
+def _check_raw(report: ValidationReport, root: Path) -> None:
+    files = _payload_files(root / "raw")
+    checksums: dict[str, list[Path]] = defaultdict(list)
+    for path in files:
+        if path.stat().st_size == 0:
+            report.error(f"raw 文件为空: {path}")
+            continue
+        checksums[_sha256(path)].append(path)
+        _check_sidecar(report, path, kind="raw", root=root)
+        _check_file_content(report, path, raw=True)
+
+    duplicate_groups = [paths for paths in checksums.values() if len(paths) > 1]
+    for paths in duplicate_groups:
+        report.warn("raw 存在相同 checksum，请确认是否必须保留多份: " + ", ".join(map(str, paths)))
+
+    for metadata_path in (root / "raw").rglob(f"*{META_SUFFIX}"):
+        target = Path(str(metadata_path)[: -len(META_SUFFIX)])
+        if not target.is_file():
+            report.error(f"raw 存在孤立元数据: {metadata_path}")
+    report.stats["raw_payload_files"] = len(files)
+    report.stats["raw_duplicate_checksum_groups"] = len(duplicate_groups)
+    report.ok("第一轮：raw 非空、sidecar、checksum、真实性标记检查完成")
+
+
+def _check_csv(report: ValidationReport, path: Path) -> tuple[list[str], list[dict]]:
     try:
         with path.open("r", encoding="utf-8-sig", newline="") as file:
             reader = csv.DictReader(file)
-            fields = reader.fieldnames or []
-            if DATE_FIELD not in fields:
-                report.error(f"CSV 缺少统一时间字段 {DATE_FIELD}: {path}")
-                return
-            row_count = 0
-            for row_index, row in enumerate(reader, start=2):
-                row_count += 1
-                _parse_date(report, str(row.get(DATE_FIELD, "")), f"{path.name}:第{row_index}行")
-            if row_count == 0:
-                report.warn(f"CSV 无数据行: {path}")
-            else:
-                report.ok(f"CSV 日期字段 {DATE_FIELD} 格式和时段有效: {path.name} ({row_count} 行)")
+            headers = list(reader.fieldnames or [])
+            rows = list(reader)
     except Exception as exc:
-        report.error(f"CSV 无法读取: {path} ({exc})")
+        report.error(f"CSV 无法读取: {path}: {exc}")
+        return [], []
+    if not headers or any(not str(item).strip() for item in headers):
+        report.error(f"CSV 表头无效: {path}")
+    if not rows:
+        report.error(f"CSV 没有数据行: {path}")
+    return headers, rows
 
 
-def _check_finish_tag(report: ValidationReport, path: Path) -> None:
+def _check_tif(report: ValidationReport, path: Path) -> tuple[int, int] | None:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        modules = payload.get("completed_modules", [])
-        if not isinstance(modules, list) or not modules:
-            report.error(f"finish.tag 缺少 completed_modules: {path}")
-            return
-        report.ok(f"finish.tag 完成模块 {len(modules)} 个: {path.parent.name}")
+        import numpy as np
+        import rasterio
+
+        with rasterio.open(path) as dataset:
+            if dataset.width <= 0 or dataset.height <= 0 or dataset.count <= 0:
+                report.error(f"GeoTIFF 尺寸或波段无效: {path}")
+                return None
+            if dataset.crs is None:
+                report.error(f"GeoTIFF 缺少 CRS: {path}")
+            values = dataset.read(masked=True)
+            valid = values.compressed()
+            if valid.size == 0:
+                report.error(f"GeoTIFF 没有有效像元: {path}")
+            elif np.issubdtype(valid.dtype, np.floating) and not np.isfinite(valid).all():
+                report.error(f"GeoTIFF 有效像元包含 NaN/Inf: {path}")
+            elif float(valid.max()) == float(valid.min()):
+                report.warn(f"GeoTIFF 有效像元为单一值，请核查成果质量: {path}")
+            return dataset.width, dataset.height
     except Exception as exc:
-        report.error(f"finish.tag 无法读取: {path} ({exc})")
+        report.error(f"GeoTIFF 无法读取: {path}: {exc}")
+        return None
 
 
-def _expected_outputs_for_period(period_token: str) -> tuple[str, ...]:
-    outputs: list[str] = []
-    for spec in MODULE_SPECS:
-        for pattern in spec.outputs:
-            outputs.append(pattern.format(period=period_token))
-    return tuple(outputs)
+def _check_image(report: ValidationReport, path: Path) -> tuple[int, int] | None:
+    try:
+        import numpy as np
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.load()
+            if image.width <= 0 or image.height <= 0:
+                report.error(f"图片尺寸无效: {path}")
+                return None
+            values = np.asarray(image)
+            if values.size == 0:
+                report.error(f"图片没有像素: {path}")
+            elif "mask" in path.stem.lower() and np.unique(values).size == 1:
+                report.warn(f"mask 只有一个类别，请核查模型效果: {path}")
+            return image.width, image.height
+    except Exception as exc:
+        report.error(f"图片无法读取: {path}: {exc}")
+        return None
 
 
-def _module_code_for_output(relative_output: str) -> str | None:
-    normalized = relative_output.replace("\\", "/")
-    period_token = Path(normalized).name.split("_", 1)[0]
-    for spec in MODULE_SPECS:
-        for pattern in spec.outputs:
-            if pattern.format(period=period_token) == normalized:
-                return spec.code
-    return None
+def _check_video(report: ValidationReport, path: Path) -> dict | None:
+    try:
+        import cv2
+
+        capture = cv2.VideoCapture(str(path))
+        if not capture.isOpened():
+            report.error(f"视频无法打开: {path}")
+            return None
+        info = {
+            "frame_count": int(capture.get(cv2.CAP_PROP_FRAME_COUNT)),
+            "fps": float(capture.get(cv2.CAP_PROP_FPS)),
+            "width": int(capture.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            "height": int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        }
+        capture.release()
+        if info["frame_count"] < 2 or info["fps"] <= 0 or info["width"] <= 0 or info["height"] <= 0:
+            report.error(f"视频帧数、FPS 或尺寸无效: {path}: {info}")
+        return info
+    except Exception as exc:
+        report.error(f"视频检查失败: {path}: {exc}")
+        return None
 
 
-def validate(root: Path, *, stage: str = "baseline-raw") -> ValidationReport:
-    report = ValidationReport()
-    root = root.expanduser().resolve()
-    allow_demo_only = _is_sample_root(root)
-    _require_dir(report, root, "孪生数据根目录")
+def _check_file_content(report: ValidationReport, path: Path, *, raw: bool = False) -> None:
+    suffix = path.suffix.lower()
+    if suffix in {".tif", ".tiff"}:
+        _check_tif(report, path)
+    elif suffix in {".png", ".jpg", ".jpeg", ".bmp"}:
+        _check_image(report, path)
+    elif suffix == ".csv":
+        _check_csv(report, path)
+    elif suffix in {".mp4", ".avi", ".mov"}:
+        _check_video(report, path)
+    elif suffix == ".json":
+        _load_json(report, path)
+    elif suffix in {".txt", ".html"}:
+        try:
+            if not path.read_text(encoding="utf-8-sig").strip():
+                report.error(f"文本成果为空: {path}")
+        except Exception as exc:
+            report.error(f"文本成果无法读取: {path}: {exc}")
 
-    baseline = root / "baseline"
-    raw = root / "raw"
-    processed = root / "processed"
-    _require_dir(report, baseline, "baseline")
-    _require_dir(report, raw, "raw")
-    _require_dir(report, processed, "processed")
 
-    for name in REQUIRED_BASELINE_FILES:
-        _require_file(report, baseline / name, f"baseline/{name}")
-    watershed_bounds = None
-    watershed_shp = baseline / "流域边界.shp"
-    if watershed_shp.exists():
-        watershed_bounds = _check_vector_crs(report, watershed_shp)
-    for name in ("河网.shp", "水库边界.shp"):
-        path = baseline / name
-        if path.exists():
-            bounds = _check_vector_crs(report, path)
-            _check_bounds_within_watershed(report, path, bounds, watershed_bounds)
-    dem = baseline / "DEM.tif"
-    if dem.exists():
-        bounds = _check_tif_crs(report, dem)
-        _check_bounds_cover_watershed(report, dem, bounds, watershed_bounds)
-        _check_baseline_raw_metadata(report, dem, allow_demo_only=allow_demo_only)
-
-    raw_period_dirs = sorted(path for path in raw.iterdir() if path.is_dir()) if raw.exists() else []
-    if not raw_period_dirs:
-        report.error(f"raw 下缺少按 年月_时段名称 组织的原始数据目录: {raw}")
-    for period_dir in raw_period_dirs:
-        _period_token_from_folder(report, period_dir, "raw")
-        period_files = sorted(
-            path
-            for path in period_dir.iterdir()
-            if path.is_file() and not path.name.endswith(".meta.json") and path.name.lower() != "readme.md"
-        )
-        if not period_files:
-            report.error(f"raw 时段目录为空: {period_dir}")
+def _check_output_source_shape(
+    report: ValidationReport, path: Path, metadata: dict | None
+) -> None:
+    if metadata is None or path.suffix.lower() not in {".png", ".jpg", ".jpeg"}:
+        return
+    if not ({"masks", "overlays"} & set(path.parts)):
+        return
+    output_size = _check_image(report, path)
+    if output_size is None:
+        return
+    for source_text in metadata.get("source_files") or []:
+        source = Path(source_text)
+        if not source.is_file():
             continue
-        report.ok(f"raw 时段目录包含 {len(period_files)} 个文件: {period_dir.name}")
-        for path in period_files:
-            if path.suffix.lower() in {".meta", ".json"} or path.name.endswith(".meta.json"):
-                continue
-            if path.suffix.lower() == ".tif" and path.exists():
-                bounds = _check_tif_crs(report, path)
-                _check_bounds_cover_watershed(report, path, bounds, watershed_bounds)
-                _check_baseline_raw_metadata(report, path, allow_demo_only=allow_demo_only)
-            if path.suffix.lower() == ".csv" and path.exists():
-                _check_csv_date(report, path)
-                _check_baseline_raw_metadata(report, path, allow_demo_only=allow_demo_only)
-            if path.suffix.lower() not in {".tif", ".csv"} and path.exists():
-                _check_baseline_raw_metadata(report, path, allow_demo_only=allow_demo_only)
+        if source.suffix.lower() in {".tif", ".tiff"}:
+            source_size = _check_tif(report, source)
+        elif source.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}:
+            source_size = _check_image(report, source)
+        else:
+            continue
+        if source_size != output_size:
+            report.error(f"mask/overlay 与输入尺寸不一致: {path}={output_size}, {source}={source_size}")
+        return
 
+
+def _check_finish_tag(report: ValidationReport, module_dir: Path, module_code: str) -> None:
+    tag = module_dir / "finish.tag"
+    if not tag.is_file() or tag.stat().st_size == 0:
+        report.error(f"模块缺少完成标记: {tag}")
+        return
+    payload = _load_json(report, tag)
+    if payload is None:
+        return
+    if payload.get("module_code") != module_code:
+        report.error(f"finish.tag 模块编号错误: {tag}")
+    recorded = set(payload.get("completed_outputs") or [])
+    actual = {
+        path.relative_to(module_dir).as_posix()
+        for path in _payload_files(module_dir)
+    }
+    if recorded != actual:
+        report.error(
+            f"finish.tag 成果清单与磁盘不一致: {tag}; "
+            f"missing={sorted(actual - recorded)}, stale={sorted(recorded - actual)}"
+        )
+
+
+def _check_m01_counts(report: ValidationReport, root: Path) -> None:
+    raw_base = root / "raw" / "remote_sensing" / "optical_rgb"
+    output_base = root / "processed" / MODULE_DIRECTORY_NAMES["M01"]
+    for task in ("snow", "water"):
+        task_raw = raw_base / f"segformer_{task}"
+        if not task_raw.exists():
+            report.error(f"M01 缺少统一 raw: {task_raw}")
+            continue
+        for split_dir in sorted(path for path in task_raw.iterdir() if path.is_dir()):
+            images = _payload_files(split_dir / "images")
+            if not images:
+                report.error(f"M01 {task}/{split_dir.name} 没有有效影像")
+                continue
+            masks = list((output_base / task / split_dir.name / "masks").glob("*.png"))
+            overlays = list((output_base / task / split_dir.name / "overlays").glob("*.png"))
+            if len(masks) != len(images) or len(overlays) != len(images):
+                report.error(
+                    f"M01 {task}/{split_dir.name} 输入输出数量不一致: "
+                    f"images={len(images)}, masks={len(masks)}, overlays={len(overlays)}"
+                )
+
+
+def _check_m04_counts(report: ValidationReport, root: Path) -> None:
+    pairs = (
+        ("sentinel1_sar/inundation_weak_labeled", "sentinel1_sar_weak"),
+        ("sentinel2_multispectral/inundation_hand_labeled", "sentinel2_optical_hand"),
+    )
+    for raw_suffix, output_suffix in pairs:
+        inputs = [
+            path
+            for path in _payload_files(root / "raw" / "remote_sensing" / raw_suffix)
+            if path.suffix.lower() in {".tif", ".tiff"}
+        ]
+        output_root = root / "processed" / MODULE_DIRECTORY_NAMES["M04"] / output_suffix
+        masks = list((output_root / "masks").glob("*.png"))
+        overlays = list((output_root / "overlays").glob("*.png"))
+        if not inputs or len(masks) != len(inputs) or len(overlays) != len(inputs):
+            report.error(
+                f"M04 {raw_suffix} 输入输出数量不一致: "
+                f"inputs={len(inputs)}, masks={len(masks)}, overlays={len(overlays)}"
+            )
+
+
+def _check_m05_csv(report: ValidationReport, root: Path) -> None:
+    path = root / "processed" / MODULE_DIRECTORY_NAMES["M05"] / "tables" / "frame_pair_velocity.csv"
+    headers, rows = _check_csv(report, path)
+    required = {
+        "frame_index",
+        "timestamp_s",
+        "velocity_px_frame",
+        "velocity_m_s",
+        "valid_pixel_count",
+        "confidence",
+        "source_video",
+    }
+    if not required.issubset(headers):
+        report.error(f"M05 CSV 字段缺失: {sorted(required - set(headers))}")
+        return
+    if any(str(row.get("velocity_m_s", "")).strip() for row in rows):
+        report.error("M05 缺少可信空间标定，velocity_m_s 必须全部留空")
+    valid_pixel_rows = [row for row in rows if str(row.get("velocity_px_frame", "")).strip()]
+    if not valid_pixel_rows:
+        report.error("M05 没有任何有效像素速度记录")
+    videos = {str(row.get("source_video", "")).strip() for row in rows if row.get("source_video")}
+    if len(videos) != 1:
+        report.error(f"M05 CSV source_video 不唯一: {sorted(videos)}")
+        return
+    video = Path(next(iter(videos)))
+    info = _check_video(report, video)
+    if info and len(rows) != info["frame_count"] - 1:
+        report.error(
+            f"M05 未处理完整视频: CSV={len(rows)} 帧对, 视频={info['frame_count']} 帧"
+        )
+
+
+def _check_module_specific_rules(report: ValidationReport, root: Path) -> None:
+    _check_m01_counts(report, root)
+    _check_m04_counts(report, root)
+    _check_m05_csv(report, root)
+
+    processed = root / "processed"
+    for forbidden in processed.rglob("*"):
+        if not forbidden.is_file():
+            continue
+        name = forbidden.name.lower()
+        if "runoff" in name:
+            report.error(f"M02 当前没有径流算法，不得生成 runoff: {forbidden}")
+        if "outflow" in name and _is_under(forbidden, processed / MODULE_DIRECTORY_NAMES["M09"]):
+            report.error(f"M09 当前没有独立出库流量算法，不得生成 outflow: {forbidden}")
+
+    m08_meta_files = (processed / MODULE_DIRECTORY_NAMES["M08"]).rglob(f"*{META_SUFFIX}")
+    for metadata_path in m08_meta_files:
+        metadata = _load_json(report, metadata_path)
+        if metadata and any("M09" in str(source) for source in metadata.get("source_files") or []):
+            report.error(f"M08 仍依赖 M09: {metadata_path}")
+
+
+def _check_processed(report: ValidationReport, root: Path) -> None:
+    processed = root / "processed"
+    total_outputs = 0
+    module_stats = {}
+    module_outputs: dict[str, list[Path]] = {}
+    contract_error_count = len(report.errors)
+    for module_code in ACTIVE_MODULES:
+        module_dir = processed / MODULE_DIRECTORY_NAMES[module_code]
+        if not module_dir.is_dir():
+            report.error(f"缺少模块成果目录: {module_dir}")
+            continue
+        for pattern in EXPECTED_OUTPUTS[module_code]:
+            matches = [path for path in module_dir.glob(pattern) if path.is_file() and path.stat().st_size > 0]
+            if not matches:
+                report.error(f"{module_code} 缺少预期实际成果: {module_dir / pattern}")
+
+        outputs = _payload_files(module_dir)
+        module_outputs[module_code] = outputs
+        module_stats[module_code] = len(outputs)
+        total_outputs += len(outputs)
+        _check_finish_tag(report, module_dir, module_code)
+        for path in outputs:
+            if path.stat().st_size == 0:
+                report.error(f"processed 成果为空: {path}")
+                continue
+            metadata = _check_sidecar(
+                report,
+                path,
+                kind="processed",
+                expected_module=module_code,
+                root=root,
+            )
+
+        for metadata_path in module_dir.rglob(f"*{META_SUFFIX}"):
+            target = Path(str(metadata_path)[: -len(META_SUFFIX)])
+            if not target.is_file():
+                report.error(f"processed 存在孤立元数据: {metadata_path}")
+
+    report.stats["processed_outputs"] = total_outputs
+    report.stats["module_output_counts"] = module_stats
+    report.ok("第二轮：八个独立模块的成果、来源链和完成标记检查完成")
+    report.rounds["round_2_module_outputs"] = {
+        "passed": len(report.errors) == contract_error_count,
+        "new_errors": len(report.errors) - contract_error_count,
+    }
+
+    quality_error_count = len(report.errors)
+    for module_code, outputs in module_outputs.items():
+        for path in outputs:
+            metadata = _load_json(report, _sidecar(path)) if _sidecar(path).is_file() else None
+            _check_file_content(report, path)
+            _check_output_source_shape(report, path, metadata)
+    _check_module_specific_rules(report, root)
+    report.ok("第三轮：栅格、图片、CSV、视频和输入输出数量质量检查完成")
+    report.rounds["round_3_output_quality"] = {
+        "passed": len(report.errors) == quality_error_count,
+        "new_errors": len(report.errors) - quality_error_count,
+    }
+
+
+def validate(root: Path, *, stage: str = "full") -> ValidationReport:
+    root = root.expanduser().resolve()
+    report = ValidationReport(root=str(root), stage=stage)
+
+    before = len(report.errors)
+    _check_root_structure(report, root)
+    _check_baseline(report, root)
+    _check_raw(report, root)
+    report.rounds["round_1_structure_and_raw"] = {
+        "passed": len(report.errors) == before,
+        "new_errors": len(report.errors) - before,
+    }
+
+    if stage == "structure":
+        return report
+    if stage not in {"baseline-raw", "full"}:
+        report.error(f"未知验证阶段: {stage}")
+        return report
     if stage == "baseline-raw":
-        report.ok("已按 baseline/raw 阶段校验，processed 模型成果等待模块运行后再校验")
         return report
 
-    scheme_dirs = sorted(path for path in processed.iterdir() if path.is_dir()) if processed.exists() else []
-    if not scheme_dirs:
-        report.error(f"processed 下缺少按 方案_工况 组织的模型成果目录: {processed}")
-    for scheme_dir in scheme_dirs:
-        if "_" not in scheme_dir.name:
-            report.error(f"processed 方案目录命名不规范，应为 方案编号_工况名称: {scheme_dir}")
-            continue
-        period_dirs = sorted(path for path in scheme_dir.iterdir() if path.is_dir())
-        if not period_dirs:
-            report.error(f"processed 方案目录下缺少时段成果目录: {scheme_dir}")
-            continue
-        for period_dir in period_dirs:
-            rel = period_dir.relative_to(root).as_posix()
-            period_token = _period_token_from_folder(report, period_dir, "processed")
-            if period_token is None:
-                continue
-            raster_dir = period_dir / "raster"
-            table_dir = period_dir / "table"
-            _require_dir(report, raster_dir, f"{rel}/raster")
-            _require_dir(report, table_dir, f"{rel}/table")
-            tag_path = period_dir / "finish.tag"
-            _require_file(report, tag_path, f"{rel}/finish.tag")
-            if tag_path.exists():
-                _check_finish_tag(report, tag_path)
-
-            for output in _expected_outputs_for_period(period_token):
-                path = period_dir / output
-                _require_file(report, path, f"{rel}/{output}")
-                module_code = _module_code_for_output(output)
-                if path.suffix.lower() == ".tif" and path.exists():
-                    bounds = _check_tif_crs(report, path)
-                    _check_bounds_cover_watershed(report, path, bounds, watershed_bounds)
-                    _check_metadata_sidecar(
-                        report,
-                        path,
-                        module_code=module_code,
-                        allow_demo_only=allow_demo_only,
-                    )
-                if path.suffix.lower() == ".csv" and path.exists():
-                    _check_csv_date(report, path)
-                    _check_metadata_sidecar(
-                        report,
-                        path,
-                        module_code=module_code,
-                        allow_demo_only=allow_demo_only,
-                    )
-                if path.suffix.lower() == ".xlsx" and path.exists():
-                    _check_metadata_sidecar(
-                        report,
-                        path,
-                        module_code=module_code,
-                        allow_demo_only=allow_demo_only,
-                    )
-
+    _check_processed(report, root)
     return report
 
 
+def _write_report(path: Path, report: ValidationReport) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="校验瓦赫什流域数字孪生标准数据目录")
+    parser = argparse.ArgumentParser(description="验证 baseline/raw/processed 独立模块数据架构")
     parser.add_argument(
         "root",
         nargs="?",
         default=str(DEFAULT_TWIN_DATA_ROOT),
-        help="瓦赫什流域孪生数据根目录，默认校验正式 data 目录",
+        help="瓦赫什流域孪生数据根目录",
     )
     parser.add_argument(
         "--stage",
-        choices=("baseline-raw", "full"),
-        default="baseline-raw",
-        help="baseline-raw 只校验真实基础/原始数据；full 额外要求 processed 已生成全部标准成果",
+        choices=("structure", "baseline-raw", "full"),
+        default="full",
+        help="structure/baseline-raw 仅检查输入；full 检查八个模块实际成果",
+    )
+    parser.add_argument(
+        "--report",
+        default=str(REPORT_PATH),
+        help="JSON 验证报告路径，必须位于 processed 之外",
     )
     args = parser.parse_args()
 
-    report = validate(Path(args.root), stage=args.stage)
+    report_path = Path(args.report).expanduser().resolve()
+    root = Path(args.root).expanduser().resolve()
+    if _is_under(report_path, root / "processed"):
+        raise ValueError("验证报告不得写入 processed")
+    report = validate(root, stage=args.stage)
+    _write_report(report_path, report)
     report.print()
+    print(f"验证报告: {report_path}")
     return 0 if report.success else 1
 
 

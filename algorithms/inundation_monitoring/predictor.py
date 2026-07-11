@@ -31,7 +31,14 @@ class FloodPredictor:
 
         self.model, self.device = load_model(weight_path=self.weight_path)
 
-    def predict(self, img_path: str, thresh: float = 0.5) -> dict[str, Any]:
+    def predict(
+        self,
+        img_path: str,
+        thresh: float = 0.5,
+        *,
+        mask_path: str | os.PathLike[str] | None = None,
+        overlay_path: str | os.PathLike[str] | None = None,
+    ) -> dict[str, Any]:
         if not os.path.exists(img_path):
             raise FileNotFoundError(f"Input image not found: {img_path}")
         if not (0.0 <= float(thresh) <= 1.0):
@@ -49,8 +56,10 @@ class FloodPredictor:
         )
 
         image_name = Path(img_path).stem
-        mask_out = OUTPUT_DIR / f"{image_name}_inundation_mask.png"
-        overlay_out = OUTPUT_DIR / f"{image_name}_inundation_overlay.png"
+        mask_out = Path(mask_path) if mask_path is not None else OUTPUT_DIR / f"{image_name}_inundation_mask.png"
+        overlay_out = Path(overlay_path) if overlay_path is not None else OUTPUT_DIR / f"{image_name}_inundation_overlay.png"
+        mask_out.parent.mkdir(parents=True, exist_ok=True)
+        overlay_out.parent.mkdir(parents=True, exist_ok=True)
 
         Image.fromarray((mask * 255).astype(np.uint8)).save(mask_out)
         Image.fromarray(overlay).save(overlay_out)

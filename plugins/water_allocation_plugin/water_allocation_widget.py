@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import calendar
+import csv
 import datetime
+import json
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -27,11 +29,15 @@ from algorithms.water_allocation.core import (
 from algorithms.water_allocation.predict import predict_downstream_total
 from app.digital_twin_standard import (
     default_run_context,
+    ensure_raw_source_path,
     mark_module_complete,
     module_output_path,
+    module_processed_dir,
     period_to_date,
+    raw_data_dir,
     standard_dialog_dir,
     write_metadata_sidecar,
+    write_raw_metadata_sidecar,
     write_standard_csv,
 )
 
@@ -51,6 +57,22 @@ except ImportError as e:
 _RESOURCE_DIR = Path(__file__).resolve().parent.parent.parent / "algorithms" / "water_allocation" / "resources"
 
 
+def _allocation_config_paths() -> dict[str, Path]:
+    root = raw_data_dir("configuration", "water_allocation")
+    return {
+        "global": root / "supply" / "global_supply_config.csv",
+        "inflow": root / "supply" / "monthly_inflow.csv",
+        "demand": root / "demand" / "demand_parameters.csv",
+        "crops": root / "crops" / "crops.csv",
+        "weights": root / "decision_weights" / "decision_weights.csv",
+    }
+
+
+def _read_csv_rows(path: Path) -> list[dict]:
+    with path.open("r", encoding="utf-8-sig", newline="") as file:
+        return list(csv.DictReader(file))
+
+
 def infer_allocation_period_name(month: int, time_scale: str) -> str:
     if time_scale == "yearly":
         return "年度分水模拟"
@@ -62,42 +84,77 @@ def infer_allocation_period_name(month: int, time_scale: str) -> str:
 
 
 def build_standard_allocation_rows(result_data, sectors, *, context):
-    D = result_data["D_demand"]
+    aggregate_demand = np.asarray(result_data["D_demand"], dtype=float).reshape(1, -1)
     loss = float(result_data["loss_rates"][0])
-    X_agg = result_data["X_agg"]
-    output_date = period_to_date(context.period)
+    aggregate_allocation = np.asarray(result_data["X_agg"], dtype=float)[None, ...]
+    time_series = result_data.get("time_series_X")
+    demand_series = result_data.get("demand_time_series")
+    supply_series = result_data.get("supply_time_series")
+    labels = list(result_data.get("date_labels") or [])
+
+    if time_series is not None and demand_series is not None:
+        allocations = np.asarray(time_series, dtype=float)
+        demands = np.asarray(demand_series, dtype=float)
+    else:
+        allocations = aggregate_allocation
+        demands = aggregate_demand
+        labels = [context.period]
+
+    if allocations.ndim != 4 or allocations.shape[1:] != (2, 1, len(sectors)):
+        raise ValueError(f"分水结果维度异常: {allocations.shape}")
+    if demands.shape != (allocations.shape[0], len(sectors)):
+        raise ValueError(f"需水结果维度异常: {demands.shape}")
+    if len(labels) != allocations.shape[0]:
+        labels = [f"period_{index + 1:03d}" for index in range(allocations.shape[0])]
+
+    supply_values = None
+    if supply_series is not None:
+        candidate = np.asarray(supply_series, dtype=float)
+        if candidate.ndim == 2 and candidate.shape[0] == allocations.shape[0]:
+            supply_values = candidate.sum(axis=1)
+
+    def output_date(label):
+        text = str(label)
+        for fmt in ("%Y-%m-%d", "%Y-%m", "%Y"):
+            try:
+                return datetime.datetime.strptime(text, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                continue
+        return period_to_date(context.period)
+
     rows = []
 
-    for j, sector in enumerate(sectors):
-        demand = float(D[0, j])
-        surface_release = float(X_agg[0, 0, j])
-        groundwater = float(X_agg[1, 0, j])
-        received = surface_release * (1.0 - loss) + groundwater
-        shortage = max(0.0, demand - received)
-        ratio = (received / demand * 100.0) if demand > 0 else 100.0
-        rows.append(
-            {
-                "date": output_date,
-                "period": context.period,
-                "period_name": context.period_name,
-                "scheme": context.scheme,
-                "scheme_name": context.scheme_name,
-                "module_code": "M08",
-                "time_scale": result_data.get("time_scale", ""),
-                "sector": sector,
-                "demand_million_m3": f"{demand:.6f}",
-                "surface_release_million_m3": f"{surface_release:.6f}",
-                "groundwater_million_m3": f"{groundwater:.6f}",
-                "received_million_m3": f"{received:.6f}",
-                "shortage_million_m3": f"{shortage:.6f}",
-                "satisfaction_ratio_pct": f"{ratio:.3f}",
-                "loss_rate_pct": f"{loss * 100.0:.3f}",
-                "gini": f"{float(result_data.get('gini', 0.0)):.6f}",
-                "profit_10k_yuan": f"{float(result_data.get('profit', 0.0)):.6f}",
-                "total_supply_million_m3": f"{float(result_data.get('W_supply', [0.0])[0]):.6f}",
-                "n_periods": int(result_data.get("n_periods", 1) or 1),
-            }
+    for time_index, label in enumerate(labels):
+        total_supply = (
+            float(supply_values[time_index])
+            if supply_values is not None
+            else float(np.asarray(result_data.get("W_supply", [0.0]), dtype=float).sum())
         )
+        for sector_index, sector in enumerate(sectors):
+            demand = float(demands[time_index, sector_index])
+            surface_release = float(allocations[time_index, 0, 0, sector_index])
+            groundwater = float(allocations[time_index, 1, 0, sector_index])
+            received = surface_release * (1.0 - loss) + groundwater
+            shortage = max(0.0, demand - received)
+            ratio = (received / demand * 100.0) if demand > 0 else 100.0
+            rows.append(
+                {
+                    "date": output_date(label),
+                    "period_index": time_index + 1,
+                    "period_label": label,
+                    "module_code": "M08",
+                    "time_scale": result_data.get("time_scale", ""),
+                    "sector": sector,
+                    "demand_million_m3": f"{demand:.6f}",
+                    "surface_release_million_m3": f"{surface_release:.6f}",
+                    "groundwater_million_m3": f"{groundwater:.6f}",
+                    "received_million_m3": f"{received:.6f}",
+                    "shortage_million_m3": f"{shortage:.6f}",
+                    "satisfaction_ratio_pct": f"{ratio:.3f}",
+                    "loss_rate_pct": f"{loss * 100.0:.3f}",
+                    "total_supply_million_m3": f"{total_supply:.6f}",
+                }
+            )
 
     return rows
 
@@ -592,6 +649,7 @@ class WaterAllocationWidget(QWidget):
         self.rs_extracted_area = 0.0
 
         self._init_ui()
+        self._load_unified_config(silent=True)
 
     # ======================= UI 初始化 =======================
     def _init_ui(self):
@@ -694,6 +752,19 @@ class WaterAllocationWidget(QWidget):
         self.w_surface_edit = QLineEdit("850")
         self.w_surface_edit.setMinimumWidth(120)
         time_grid.addWidget(self.w_surface_edit, 1, 3)
+
+        config_actions = QWidget()
+        config_actions_layout = QHBoxLayout(config_actions)
+        config_actions_layout.setContentsMargins(0, 0, 0, 0)
+        load_config_btn = QPushButton("加载统一配置")
+        save_config_btn = QPushButton("回写统一配置")
+        load_config_btn.clicked.connect(lambda: self._load_unified_config(silent=False))
+        save_config_btn.clicked.connect(lambda: self._save_unified_config(silent=False))
+        config_actions_layout.addWidget(load_config_btn)
+        config_actions_layout.addWidget(save_config_btn)
+        config_actions_layout.addStretch()
+        time_grid.addWidget(QLabel("配置文件:"), 2, 0)
+        time_grid.addWidget(config_actions, 2, 1, 1, 5)
 
         body.addWidget(time_box)
 
@@ -878,6 +949,175 @@ class WaterAllocationWidget(QWidget):
         body.addWidget(run_btn)
         body.addStretch()
 
+    def _load_unified_config(self, *, silent: bool = False):
+        paths = _allocation_config_paths()
+        try:
+            missing = [str(path) for path in paths.values() if not path.is_file() or path.stat().st_size == 0]
+            if missing:
+                raise FileNotFoundError("统一配置缺失:\n" + "\n".join(missing))
+
+            global_rows = _read_csv_rows(paths["global"])
+            if len(global_rows) != 1:
+                raise ValueError("global_supply_config.csv 必须且只能有一行。")
+            global_cfg = global_rows[0]
+            self.start_year_cb.setCurrentText(str(global_cfg["start_year"]))
+            self.start_month_cb.setCurrentText(str(global_cfg["start_month"]))
+            self.end_year_cb.setCurrentText(str(global_cfg["end_year"]))
+            self.end_month_cb.setCurrentText(str(global_cfg["end_month"]))
+            self.time_scale_cb.setCurrentText(str(global_cfg["time_scale"]))
+            self.w_surface_edit.setText(str(global_cfg["initial_surface_supply_mcm"]))
+
+            inflow_rows = sorted(_read_csv_rows(paths["inflow"]), key=lambda row: int(row["month"]))
+            if [int(row["month"]) for row in inflow_rows] != list(range(1, 13)):
+                raise ValueError("monthly_inflow.csv 必须包含 1-12 月全部记录。")
+            self.current_monthly_inflow = np.asarray(
+                [float(row["inflow_m3_s"]) for row in inflow_rows], dtype=float
+            )
+
+            for row in _read_csv_rows(paths["demand"]):
+                key = str(row["ui_key"])
+                value = str(row["value"])
+                if key.startswith("meteo."):
+                    self.meteo_params[key.split(".", 1)[1]] = float(value)
+                elif key in self._param_edits:
+                    self._param_edits[key].setText(value)
+
+            for crop_row in list(self.crop_rows):
+                self.remove_crop_row(crop_row)
+            for item in _read_csv_rows(paths["crops"]):
+                self.add_crop_row()
+                row = self.crop_rows[-1]
+                row.crop_type.setCurrentText(str(item["crop_type"]))
+                row.crop_stage.setCurrentText(str(item["growth_stage"]))
+                row.area_edit.setText(str(item["area_km2"]))
+                row.yield_edit.setText(str(item["yield_kg_km2"]))
+                row.price_edit.setText(str(item["price_cny_kg"]))
+            if not self.crop_rows:
+                self.add_crop_row()
+
+            weights = {
+                (row["group"], row["name"]): str(row["value"])
+                for row in _read_csv_rows(paths["weights"])
+            }
+            self.w_econ_edit.setText(weights[("preference", "economic")])
+            self.w_short_edit.setText(weights[("preference", "shortage")])
+            self.w_gini_edit.setText(weights[("preference", "gini")])
+            for sector, edit in zip(self.sectors, self.t_edits):
+                edit.setText(weights[("sector", sector)])
+            self.hydro_pmax_edit.setText(weights[("hydropower", "max_power_mw")])
+            self.hydro_qmax_edit.setText(weights[("hydropower", "max_flow_m3_s")])
+            self.hydro_price_edit.setText(weights[("hydropower", "electricity_price_cny_kwh")])
+            if not silent:
+                QMessageBox.information(self, "加载完成", "已从统一 raw 完整恢复 M08 界面配置。")
+        except Exception as exc:
+            if silent:
+                self.current_monthly_inflow = None
+            else:
+                QMessageBox.critical(self, "配置加载失败", str(exc))
+
+    def _write_config_metadata(self, path: Path, *, dataset_name: str):
+        write_raw_metadata_sidecar(
+            path,
+            data_role="water_allocation_configuration",
+            data_status="ui_configured",
+            source_name="M08 界面配置",
+            source_files=[Path(__file__).resolve()],
+            extra={
+                "data_type": "water_allocation_configuration",
+                "dataset_name": dataset_name,
+                "source_origin": "water_allocation_plugin UI",
+                "consumer_modules": ["M08"],
+                "is_module_native": True,
+            },
+        )
+
+    def _save_unified_config(self, *, silent: bool = False):
+        paths = _allocation_config_paths()
+        try:
+            if self.current_monthly_inflow is None or len(self.current_monthly_inflow) != 12:
+                raise ValueError("缺少 12 个月显式入流，不能回写配置。")
+            for path in paths.values():
+                path.parent.mkdir(parents=True, exist_ok=True)
+            start_year = int(self.start_year_cb.currentText())
+            write_standard_csv(
+                paths["global"],
+                fieldnames=[
+                    "start_year", "start_month", "end_year", "end_month", "time_scale",
+                    "initial_surface_supply_mcm", "inflow_source_year",
+                ],
+                rows=[{
+                    "start_year": start_year,
+                    "start_month": int(self.start_month_cb.currentText()),
+                    "end_year": int(self.end_year_cb.currentText()),
+                    "end_month": int(self.end_month_cb.currentText()),
+                    "time_scale": self.time_scale_cb.currentText(),
+                    "initial_surface_supply_mcm": float(self.w_surface_edit.text()),
+                    "inflow_source_year": start_year,
+                }],
+            )
+            write_standard_csv(
+                paths["inflow"],
+                fieldnames=["year", "month", "inflow_m3_s", "source", "quality_status"],
+                rows=[{
+                    "year": start_year,
+                    "month": month,
+                    "inflow_m3_s": float(self.current_monthly_inflow[month - 1]),
+                    "source": "water_allocation_plugin_ui",
+                    "quality_status": "user_reviewed_configuration",
+                } for month in range(1, 13)],
+            )
+            demand_rows = [
+                {"parameter": key, "value": edit.text(), "unit": "see_ui_label", "ui_key": key}
+                for key, edit in self._param_edits.items()
+            ] + [
+                {"parameter": key, "value": value, "unit": "see_ui_label", "ui_key": f"meteo.{key}"}
+                for key, value in self.meteo_params.items()
+            ]
+            write_standard_csv(
+                paths["demand"],
+                fieldnames=["parameter", "value", "unit", "ui_key"],
+                rows=demand_rows,
+            )
+            crop_rows = [row.collect() for row in self.crop_rows]
+            crop_rows = [row for row in crop_rows if row is not None]
+            if not crop_rows:
+                raise ValueError("至少需要一行有效作物配置。")
+            write_standard_csv(
+                paths["crops"],
+                fieldnames=["crop_type", "growth_stage", "area_km2", "yield_kg_km2", "price_cny_kg", "kc"],
+                rows=[{
+                    "crop_type": row["type"],
+                    "growth_stage": row["stage"],
+                    "area_km2": row["area"],
+                    "yield_kg_km2": row["yield"],
+                    "price_cny_kg": row["price"],
+                    "kc": self.fao_kc[row["type"]][row["stage"]],
+                } for row in crop_rows],
+            )
+            weight_rows = [
+                {"group": "preference", "name": "economic", "value": self.w_econ_edit.text()},
+                {"group": "preference", "name": "shortage", "value": self.w_short_edit.text()},
+                {"group": "preference", "name": "gini", "value": self.w_gini_edit.text()},
+            ] + [
+                {"group": "sector", "name": sector, "value": edit.text()}
+                for sector, edit in zip(self.sectors, self.t_edits)
+            ] + [
+                {"group": "hydropower", "name": "max_power_mw", "value": self.hydro_pmax_edit.text()},
+                {"group": "hydropower", "name": "max_flow_m3_s", "value": self.hydro_qmax_edit.text()},
+                {"group": "hydropower", "name": "electricity_price_cny_kwh", "value": self.hydro_price_edit.text()},
+            ]
+            write_standard_csv(
+                paths["weights"], fieldnames=["group", "name", "value"], rows=weight_rows
+            )
+            for key, path in paths.items():
+                self._write_config_metadata(path, dataset_name=f"M08 {key} configuration")
+            if not silent:
+                QMessageBox.information(self, "回写完成", "M08 全部界面配置已回写到统一 raw。")
+        except Exception as exc:
+            if silent:
+                raise
+            QMessageBox.critical(self, "配置回写失败", str(exc))
+
     def _build_hydro_tab(self):
         layout = QVBoxLayout(self.tab_hydro)
 
@@ -907,7 +1147,7 @@ class WaterAllocationWidget(QWidget):
         self.nc_data_path_edit = QLineEdit()
         self.nc_data_path_edit.setReadOnly(True)
         ds_row.addWidget(self.nc_data_path_edit)
-        for text, slot in [("选择文件", self._select_nc_file), ("选择文件夹", self._select_nc_dir), ("清空", lambda: self.nc_data_path_edit.setText(""))]:
+        for text, slot in [("选择文件", self._select_nc_file), ("清空", lambda: self.nc_data_path_edit.setText(""))]:
             btn = QPushButton(text)
             btn.clicked.connect(slot)
             ds_row.addWidget(btn)
@@ -941,9 +1181,7 @@ class WaterAllocationWidget(QWidget):
         self.train_data_path_edit = QLineEdit()
         train_row.addWidget(self.train_data_path_edit)
         train_browse = QPushButton("浏览")
-        train_browse.clicked.connect(lambda: self.train_data_path_edit.setText(
-            QFileDialog.getOpenFileName(self, "选择训练数据", standard_dialog_dir("raw"), "CSV/Excel (*.csv *.xlsx *.xls);;NetCDF (*.nc)")[0]
-            or self.train_data_path_edit.text()))
+        train_browse.clicked.connect(self._select_training_data)
         train_row.addWidget(train_browse)
         train_layout.addLayout(train_row)
 
@@ -995,6 +1233,11 @@ class WaterAllocationWidget(QWidget):
             return
         filepaths = QFileDialog.getOpenFileNames(self, "选择影像", standard_dialog_dir("raw"), "GeoTIFF (*.tif *.tiff)")[0]
         if not filepaths:
+            return
+        try:
+            filepaths = [str(ensure_raw_source_path(path)) for path in filepaths]
+        except Exception as exc:
+            QMessageBox.warning(self, "输入路径错误", str(exc))
             return
         weights_path = str(_RESOURCE_DIR / "models" / "3_Class_FULL_FTW_Pretrained_v2.ckpt")
         if not os.path.exists(weights_path):
@@ -1176,6 +1419,7 @@ class WaterAllocationWidget(QWidget):
     # ======================= NSGA-II 优化 =======================
     def run_nsga2_optimization(self):
         try:
+            self._save_unified_config(silent=True)
             demands = self._calc_demands()
             if demands is None:
                 QMessageBox.critical(self, "错误", "需水计算失败，请检查参数。")
@@ -1213,7 +1457,10 @@ class WaterAllocationWidget(QWidget):
             if self.current_monthly_inflow is not None:
                 monthly_inflow = np.asarray(self.current_monthly_inflow)
             else:
-                monthly_inflow = np.full(12, 500.0)  #默认径流量
+                raise ValueError(
+                    "缺少统一 monthly_inflow.csv。请先点击“加载统一配置”，"
+                    "系统不会再使用固定 500 m³/s 代替真实入流。"
+                )
 
             W_supply = np.zeros((n_periods, 2))
             for t in range(n_periods):
@@ -1305,12 +1552,19 @@ class WaterAllocationWidget(QWidget):
                 "gini": float(res.F[best_idx, 2]),
                 "X_agg": X_agg,
                 "D_demand": D_demand.sum(axis=0).reshape(1, -1),
+                "demand_time_series": D_demand,
                 "loss_rates": loss_rates,
                 "W_supply": W_supply.sum(axis=0),
+                "supply_time_series": W_supply,
                 "a_hydro": a_hydro,
                 "n_periods": n_periods,
                 "time_series_X": best_X if n_periods > 1 else None,
                 "date_labels": date_labels if n_periods > 1 else None,
+                "optimizer": {
+                    "algorithm": "NSGA-II",
+                    "population_size": pop_size,
+                    "generations": n_gen,
+                },
             }
             try:
                 standard_csv = self._export_standard_result(result_data)
@@ -1332,13 +1586,22 @@ class WaterAllocationWidget(QWidget):
 
     def _export_standard_result(self, result_data):
         context = self._standard_run_context(result_data)
-        output_path = module_output_path("M08", context=context)
+        config_files = [path for path in _allocation_config_paths().values() if path.is_file()]
+        socioeconomic_files = sorted(
+            path
+            for path in raw_data_dir("socioeconomic", "water_demand").glob("*.csv")
+            if path.is_file() and path.stat().st_size > 0
+        )
+        source_files = config_files + socioeconomic_files
+        if not config_files:
+            raise FileNotFoundError("M08 统一配置不存在，无法记录真实输入来源。")
+
+        output_path = module_output_path("M08", context=context, output_index=0)
+        summary_path = module_output_path("M08", context=context, output_index=1)
         fieldnames = [
             "date",
-            "period",
-            "period_name",
-            "scheme",
-            "scheme_name",
+            "period_index",
+            "period_label",
             "module_code",
             "time_scale",
             "sector",
@@ -1349,29 +1612,50 @@ class WaterAllocationWidget(QWidget):
             "shortage_million_m3",
             "satisfaction_ratio_pct",
             "loss_rate_pct",
-            "gini",
-            "profit_10k_yuan",
             "total_supply_million_m3",
-            "n_periods",
         ]
         rows = build_standard_allocation_rows(result_data, self.sectors, context=context)
         write_standard_csv(output_path, fieldnames=fieldnames, rows=rows)
+        total_demand = sum(float(row["demand_million_m3"]) for row in rows)
+        total_received = sum(float(row["received_million_m3"]) for row in rows)
+        total_shortage = sum(float(row["shortage_million_m3"]) for row in rows)
+        summary_rows = [
+            {"metric": "profit", "value": float(result_data.get("profit", 0.0)), "unit": "algorithm_objective"},
+            {"metric": "shortage", "value": total_shortage, "unit": "million_m3"},
+            {"metric": "gini", "value": float(result_data.get("gini", 0.0)), "unit": "ratio"},
+            {"metric": "total_demand", "value": total_demand, "unit": "million_m3"},
+            {"metric": "total_received", "value": total_received, "unit": "million_m3"},
+            {
+                "metric": "overall_satisfaction",
+                "value": total_received / total_demand if total_demand > 0 else 1.0,
+                "unit": "ratio",
+            },
+        ]
+        write_standard_csv(
+            summary_path,
+            fieldnames=["metric", "value", "unit"],
+            rows=summary_rows,
+        )
+        metadata_extra = {
+            "time_scale": result_data.get("time_scale", ""),
+            "period_count": int(result_data.get("n_periods", 1) or 1),
+            "sectors": list(self.sectors),
+            "optimizer": result_data.get("optimizer", {}),
+            "independent_of_m09": True,
+        }
         write_metadata_sidecar(
             output_path,
             module_code="M08",
             field="allocation",
-            source_files=[
-                module_output_path("M09", context=context, output_index=0),
-                module_output_path("M09", context=context, output_index=1),
-            ],
-            extra={
-                "scheme": context.scheme,
-                "scheme_name": context.scheme_name,
-                "period": context.period,
-                "period_name": context.period_name,
-                "time_scale": result_data.get("time_scale", ""),
-                "sectors": list(self.sectors),
-            },
+            source_files=source_files,
+            extra={"output_type": "period_sector_allocation_plan", **metadata_extra},
+        )
+        write_metadata_sidecar(
+            summary_path,
+            module_code="M08",
+            field="allocation_summary",
+            source_files=source_files,
+            extra={"output_type": "allocation_optimization_summary", **metadata_extra},
         )
         mark_module_complete(context, "M08")
         return output_path
@@ -1396,20 +1680,30 @@ class WaterAllocationWidget(QWidget):
                 end = pd.Timestamp(year=ey, month=em + 1, day=1) - pd.Timedelta(days=1)
             d = start
             while d <= end:
-                labels.append(d.strftime("%m-%d"))
+                labels.append(d.strftime("%Y-%m-%d"))
                 d += pd.Timedelta(days=1)
         return labels
 
     # ======================= 水文数据 Tab =======================
+    def _select_training_data(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择训练数据", standard_dialog_dir("raw"), "CSV/Excel (*.csv *.xlsx *.xls);;NetCDF (*.nc)")
+        if not path:
+            return
+        try:
+            self.train_data_path_edit.setText(str(ensure_raw_source_path(path)))
+        except Exception as exc:
+            QMessageBox.warning(self, "输入路径错误", str(exc))
+
     def _select_nc_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "选择数据", standard_dialog_dir("raw"), "Data (*.nc *.csv *.xlsx *.xls)")
         if path:
-            self.nc_data_path_edit.setText(path)
+            try:
+                self.nc_data_path_edit.setText(str(ensure_raw_source_path(path)))
+            except Exception as exc:
+                QMessageBox.warning(self, "输入路径错误", str(exc))
 
     def _select_nc_dir(self):
-        path = QFileDialog.getExistingDirectory(self, "选择目录", standard_dialog_dir("raw"))
-        if path:
-            self.nc_data_path_edit.setText(path)
+        QMessageBox.information(self, "请选择具体文件", "标准数据管线不再支持目录扫描，请选择 raw 时段目录中的具体 CSV/Excel/NetCDF 文件。")
 
     def _sync_target_year(self):
         sy = self.start_year_cb.currentText()
@@ -1422,6 +1716,8 @@ class WaterAllocationWidget(QWidget):
     def _preview_water_info(self):
         filepath = self.nc_data_path_edit.text().strip()
         try:
+            if filepath:
+                filepath = str(ensure_raw_source_path(filepath))
             self.preview_status.setText("🔄 预测中...")
             self.preview_status.setStyleSheet("color: blue;")
             target_year = int(self.start_year_cb.currentText())
@@ -1457,6 +1753,11 @@ class WaterAllocationWidget(QWidget):
         data_path = self.train_data_path_edit.text().strip()
         if not data_path or not os.path.exists(data_path):
             QMessageBox.warning(self, "数据错误", "请选择有效的训练数据文件")
+            return
+        try:
+            data_path = str(ensure_raw_source_path(data_path))
+        except Exception as exc:
+            QMessageBox.warning(self, "输入路径错误", str(exc))
             return
         self.train_btn.setEnabled(False)
         self.train_status.setText("🔄 训练中...")

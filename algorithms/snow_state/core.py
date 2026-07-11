@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import math
+import os
 import re
+import time
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 
-DEFAULT_BBOX = [70.0, 36.0, 76.5, 40.0]
-DEFAULT_PROJECT_ID = "northern-window-485210-b3"
+DEFAULT_BBOX = [69.0, 38.0, 74.0, 40.1]
+DEFAULT_PROJECT_ID = "cosmic-descent-489809-a1"
 DEFAULT_DRIVE_FOLDER = "Pamir_Warning_System_Outputs"
 DEFAULT_TASK_PREFIX = "Pamir_Runoff_Warning"
 
@@ -32,8 +35,159 @@ BAND_DESCRIPTIONS = {
     "Runoff_Probability": "湿雪区融雪径流发生概率，0-100",
 }
 
+SNOW_DENSITY_BY_TYPE_GCM3 = {1: 0.0, 2: 0.25, 3: 0.40}
+
+
+def process_local_gee_product(
+    source_path: str | Path,
+    snow_type_output: str | Path,
+    snow_density_output: str | Path,
+    statistics_output: str | Path,
+) -> dict[str, Any]:
+    """Convert an existing GEE Snow_State product into M06 local outputs."""
+    import csv
+
+    import numpy as np
+    import rasterio
+
+    source = Path(source_path)
+    if not source.is_file() or source.stat().st_size == 0:
+        raise FileNotFoundError(source)
+
+    with rasterio.open(source) as dataset:
+        if dataset.count < 1:
+            raise ValueError(f"GEE 产品缺少 Snow_State 波段: {source}")
+        raw_state = dataset.read(1, masked=True).astype(np.float32)
+        valid = ~np.ma.getmaskarray(raw_state) & np.isfinite(raw_state.filled(np.nan))
+        rounded = np.rint(raw_state.filled(0)).astype(np.uint8)
+        unexpected = sorted(int(value) for value in np.unique(rounded[valid]) if value not in STATE_LABELS)
+        if unexpected:
+            raise ValueError(f"Snow_State 存在未定义类别 {unexpected}: {source}")
+        state = np.where(valid, rounded, 0).astype(np.uint8)
+        density = np.full(state.shape, -9999.0, dtype=np.float32)
+        for class_code, value in SNOW_DENSITY_BY_TYPE_GCM3.items():
+            density[state == class_code] = value
+        source_profile = dataset.profile.copy()
+        source_crs = dataset.crs
+        transform = dataset.transform
+        band_count = dataset.count
+
+    snow_type_path = Path(snow_type_output)
+    snow_density_path = Path(snow_density_output)
+    statistics_path = Path(statistics_output)
+    for path in (snow_type_path, snow_density_path, statistics_path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    type_profile = source_profile.copy()
+    type_profile.update(count=1, dtype="uint8", nodata=0, compress="lzw")
+    with rasterio.open(snow_type_path, "w", **type_profile) as target:
+        target.write(state, 1)
+        target.set_band_description(1, "Snow_State")
+
+    density_profile = source_profile.copy()
+    density_profile.update(count=1, dtype="float32", nodata=-9999.0, compress="lzw")
+    with rasterio.open(snow_density_path, "w", **density_profile) as target:
+        target.write(density, 1)
+        target.set_band_description(1, "Snow_Density_gcm3")
+
+    pixel_area_km2 = None
+    if source_crs and source_crs.is_projected:
+        pixel_area_km2 = abs(float(transform.a) * float(transform.e)) / 1_000_000.0
+    rows = []
+    valid_count = int(np.count_nonzero(valid))
+    for class_code, class_label in STATE_LABELS.items():
+        count = int(np.count_nonzero(state == class_code))
+        rows.append(
+            {
+                "class_code": class_code,
+                "class_label": class_label,
+                "pixel_count": count,
+                "valid_pixel_ratio": count / valid_count if valid_count else 0.0,
+                "area_km2": count * pixel_area_km2 if pixel_area_km2 is not None else "",
+                "density_g_cm3": SNOW_DENSITY_BY_TYPE_GCM3[class_code],
+            }
+        )
+    with statistics_path.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "class_code",
+                "class_label",
+                "pixel_count",
+                "valid_pixel_ratio",
+                "area_km2",
+                "density_g_cm3",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return {
+        "source": str(source),
+        "snow_type": str(snow_type_path),
+        "snow_density": str(snow_density_path),
+        "statistics": str(statistics_path),
+        "band_count": band_count,
+        "shape": list(state.shape),
+        "crs": str(source_crs) if source_crs else None,
+        "classes": rows,
+    }
+
+
+def _merge_no_proxy(existing: str, configured: str) -> str:
+    values = []
+    seen = set()
+    for item in f"{existing},{configured}".split(","):
+        value = item.strip()
+        if value and value not in seen:
+            values.append(value)
+            seen.add(value)
+    return ",".join(values)
+
+
+def _apply_project_proxy() -> str | None:
+    try:
+        from config import GEE_PROXY_ENABLED, GEE_PROXY_NO_PROXY, GEE_PROXY_URL
+    except Exception:
+        return None
+
+    if not GEE_PROXY_ENABLED:
+        return None
+
+    proxy_url = str(GEE_PROXY_URL or "").strip()
+    if not proxy_url:
+        return None
+
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        os.environ[key] = proxy_url
+
+    no_proxy = str(GEE_PROXY_NO_PROXY or "").strip()
+    if no_proxy:
+        for key in ("NO_PROXY", "no_proxy"):
+            os.environ[key] = _merge_no_proxy(os.environ.get(key, ""), no_proxy)
+
+    return proxy_url
+
+
+def _apply_project_oauth_endpoint(ee_module) -> str | None:
+    try:
+        from config import GEE_OAUTH_TOKEN_URI
+    except Exception:
+        return None
+
+    token_uri = str(GEE_OAUTH_TOKEN_URI or "").strip()
+    if not token_uri:
+        return None
+
+    try:
+        ee_module.oauth.TOKEN_URI = token_uri
+    except AttributeError:
+        return None
+    return token_uri
+
 
 def _load_ee():
+    _apply_project_proxy()
     try:
         import ee
     except ImportError as exc:
@@ -41,7 +195,35 @@ def _load_ee():
             "未安装 earthengine-api，无法运行积雪状态识别模块。"
             "请先执行: pip install earthengine-api"
         ) from exc
+    _apply_project_oauth_endpoint(ee)
     return ee
+
+
+def _initialize_ee(ee, project_id: str | None) -> None:
+    if project_id:
+        ee.Initialize(project=project_id)
+    else:
+        ee.Initialize()
+
+
+def _initialize_ee_with_retries(
+    ee,
+    project_id: str | None,
+    attempts: int = 3,
+    delay_seconds: float = 1.0,
+) -> None:
+    last_error = None
+    for attempt_index in range(attempts):
+        try:
+            if attempt_index and hasattr(ee, "Reset"):
+                ee.Reset()
+            _initialize_ee(ee, project_id)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt_index < attempts - 1:
+                time.sleep(delay_seconds)
+    raise last_error
 
 
 def validate_bbox_coords(bbox_coords: Iterable[float]) -> List[float]:
@@ -72,27 +254,23 @@ def ensure_earth_engine(
     ee = _load_ee()
     safe_project_id = (project_id or "").strip() or None
     try:
-        if safe_project_id:
-            ee.Initialize(project=safe_project_id)
-        else:
-            ee.Initialize()
+        _initialize_ee_with_retries(ee, safe_project_id)
         return "Google Earth Engine 已初始化。"
     except Exception as exc:
         if not authenticate:
             raise RuntimeError(
-                "Google Earth Engine 尚未初始化。"
-                "请先点击“初始化 GEE”完成认证，或在命令行中先执行 Earth Engine 登录。"
+                "Google Earth Engine 尚未初始化，或当前 Project ID 无权限/网络不可用。"
+                "请先点击“初始化 GEE”完成认证，或检查代理和 Project ID。"
+                f"底层错误: {exc}"
             ) from exc
 
     try:
         ee.Authenticate()
-        if safe_project_id:
-            ee.Initialize(project=safe_project_id)
-        else:
-            ee.Initialize()
+        _initialize_ee_with_retries(ee, safe_project_id)
     except Exception as auth_exc:
         raise RuntimeError(
             "Google Earth Engine 认证失败，请检查网络、账号权限和 Project ID。"
+            f"底层错误: {auth_exc}"
         ) from auth_exc
 
     return "Google Earth Engine 认证并初始化成功。"
@@ -217,15 +395,21 @@ def generate_runoff_warning(
             .filter(ee.Filter.eq("orbitProperties_pass", orbit_pass))
         )
 
-        ref_img = (
-            s1_col.filterDate(sar_ref_start, sar_ref_end)
-            .mean()
-            .focal_median(radius=30, kernelType="circle", units="meters")
+        def safe_mean(collection):
+            empty = (
+                ee.Image.constant([0, 0, 45])
+                .rename(["VV", "VH", "angle"])
+                .updateMask(ee.Image.constant(0))
+            )
+            return ee.Image(
+                ee.Algorithms.If(collection.size().gt(0), collection.mean(), empty)
+            ).select(["VV", "VH", "angle"])
+
+        ref_img = safe_mean(s1_col.filterDate(sar_ref_start, sar_ref_end)).focal_median(
+            radius=30, kernelType="circle", units="meters"
         )
-        melt_img = (
-            s1_col.filterDate(sar_melt_start, sar_melt_end)
-            .mean()
-            .focal_median(radius=30, kernelType="circle", units="meters")
+        melt_img = safe_mean(s1_col.filterDate(sar_melt_start, sar_melt_end)).focal_median(
+            radius=30, kernelType="circle", units="meters"
         )
 
         noise_mask = ref_img.select("VV").gt(-20).And(ref_img.select("VH").gt(-24))

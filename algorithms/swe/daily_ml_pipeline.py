@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -485,11 +486,27 @@ def cycle_string(cycle_dt: datetime) -> str:
     return cycle_dt.strftime("%Y%m%dT%HZ")
 
 
-def load_study_area_geometries() -> list[dict[str, Any]]:
-    reader = shapefile.Reader(str(STUDY_AREA_PATH))
-    geometries = [mapping(shape(record.__geo_interface__)) for record in reader.shapes()]
+def load_study_area_geometries(boundary_path: str | Path | None = None) -> list[dict[str, Any]]:
+    target = Path(boundary_path) if boundary_path is not None else STUDY_AREA_PATH
+    reader = shapefile.Reader(str(target))
+    source_shapes = [shape(record.__geo_interface__) for record in reader.shapes()]
+    if boundary_path is None:
+        geometries = [mapping(geometry) for geometry in source_shapes]
+    else:
+        from pyproj import CRS, Transformer
+        from shapely.ops import transform as transform_geometry
+
+        projection_path = target.with_suffix(".prj")
+        if not projection_path.is_file():
+            raise FileNotFoundError(f"统一流域边界缺少投影文件: {projection_path}")
+        source_crs = CRS.from_wkt(projection_path.read_text(encoding="utf-8"))
+        transformer = Transformer.from_crs(source_crs, "EPSG:4326", always_xy=True)
+        geometries = [
+            mapping(transform_geometry(transformer.transform, geometry))
+            for geometry in source_shapes
+        ]
     if not geometries:
-        raise ValueError("Study area shapefile does not contain any geometry.")
+        raise ValueError(f"Study area shapefile does not contain any geometry: {target}")
     return geometries
 
 
@@ -653,10 +670,14 @@ def _masked_array_stats(values: np.ndarray, mask: np.ndarray | None = None) -> d
     }
 
 
-def build_inside_mask(longitudes: np.ndarray, latitudes_desc: np.ndarray) -> np.ndarray:
+def build_inside_mask(
+    longitudes: np.ndarray,
+    latitudes_desc: np.ndarray,
+    boundary_path: str | Path | None = None,
+) -> np.ndarray:
     import rasterio.features
 
-    geometries = load_study_area_geometries()
+    geometries = load_study_area_geometries(boundary_path)
     transform = _grid_transform(longitudes, latitudes_desc)
     outside = rasterio.features.geometry_mask(
         geometries=geometries,
@@ -760,9 +781,10 @@ def save_raster(
     output_path: Path,
     nodata: float | int,
     dtype: str,
+    boundary_path: str | Path | None = None,
 ) -> str:
     ensure_directories()
-    geometries = load_study_area_geometries()
+    geometries = load_study_area_geometries(boundary_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     oriented, lat_desc, lons = ensure_lat_desc(array, latitudes, longitudes)
@@ -2626,6 +2648,9 @@ def save_forcing_cache(
         snow_cover_fraction=snow_cover_fraction.astype(np.float32),
         viirs_available=viirs_available.astype(np.float32),
         viirs_missing=np.array([1 if viirs_status == "missing" else 0], dtype=np.int16),
+        latitudes=np.asarray(forcing["latitudes"], dtype=np.float32),
+        longitudes=np.asarray(forcing["longitudes"], dtype=np.float32),
+        orography_m=np.asarray(forcing["terrain"]["orography"], dtype=np.float32),
     )
     return str(path)
 
@@ -3078,6 +3103,282 @@ def run_backfill(days_back: int = 7, force_retrain: bool = False) -> dict[str, A
     write_daily_series(manifest)
     emit_progress("最近所选日期的 SWE 回算结果已全部写入。", stage="backfill")
     return build_result_payload(manifest)
+
+
+def run_unified_forcing_offline(
+    forcing_path: str | Path,
+    dem_path: str | Path,
+    swe_output: str | Path,
+    snowmelt_output: str | Path,
+    statistics_output: str | Path,
+    *,
+    model_path: str | Path = MODEL_PATH,
+) -> dict[str, Any]:
+    """Replay one existing forcing archive without any network access."""
+    import csv
+
+    import joblib
+    import rasterio
+    from pyproj import Transformer
+
+    forcing_file = Path(forcing_path)
+    dem_file = Path(dem_path)
+    model_file = Path(model_path)
+    for path in (forcing_file, dem_file, model_file):
+        if not path.is_file() or path.stat().st_size == 0:
+            raise FileNotFoundError(path)
+
+    date_match = re.search(r"(20\d{6})", forcing_file.stem)
+    if date_match is None:
+        raise ValueError(f"forcing 文件名缺少 YYYYMMDD 日期: {forcing_file.name}")
+    business_date_value = datetime.strptime(date_match.group(1), "%Y%m%d").date()
+
+    required = {
+        "temp_mean_c",
+        "temp_min_c",
+        "temp_max_c",
+        "precipitation_mm",
+        "solid_precip_mm",
+        "snow_cover_fraction",
+        "viirs_available",
+    }
+    with np.load(forcing_file, allow_pickle=False) as archive:
+        missing = sorted(required - set(archive.files))
+        if missing:
+            raise ValueError(f"forcing 缺少字段 {missing}: {forcing_file}")
+        forcing = {name: archive[name].astype(np.float32) for name in required}
+        viirs_missing = bool(int(archive["viirs_missing"][0])) if "viirs_missing" in archive else False
+        has_coordinates = {"latitudes", "longitudes"}.issubset(archive.files)
+        latitudes = archive["latitudes"].astype(np.float32) if has_coordinates else None
+        longitudes = archive["longitudes"].astype(np.float32) if has_coordinates else None
+        orography = archive["orography_m"].astype(np.float32) if "orography_m" in archive else None
+
+    with rasterio.open(dem_file) as dataset:
+        dem_masked = dataset.read(1, masked=True).astype(np.float32)
+        dem = dem_masked.filled(np.nan)
+        profile = dataset.profile.copy()
+        transform = dataset.transform
+        dem_crs = dataset.crs
+
+    shape = forcing["temp_mean_c"].shape
+    if dem_crs is None:
+        raise ValueError(f"统一 DEM 缺少 CRS: {dem_file}")
+    if any(array.shape != shape for array in forcing.values()):
+        raise ValueError(f"forcing 内部数组尺寸不一致: {forcing_file}")
+    boundary_path = dem_file.parent / "流域边界.shp"
+    geographic_grid = bool(has_coordinates)
+    terrain_source = "baseline_dem_native_grid"
+
+    if geographic_grid:
+        if latitudes is None or longitudes is None:
+            raise ValueError(f"forcing 坐标字段不完整: {forcing_file}")
+        if latitudes.ndim != 1 or longitudes.ndim != 1:
+            raise ValueError(f"forcing 经纬度必须是一维坐标: {forcing_file}")
+        if shape != (len(latitudes), len(longitudes)):
+            raise ValueError(
+                f"forcing 数组 {shape} 与坐标 ({len(latitudes)}, {len(longitudes)}) 不一致"
+            )
+        if latitudes[0] < latitudes[-1]:
+            latitudes = latitudes[::-1].copy()
+            forcing = {name: array[::-1, :].copy() for name, array in forcing.items()}
+            if orography is not None:
+                orography = orography[::-1, :].copy()
+        if not boundary_path.is_file():
+            raise FileNotFoundError(f"统一 baseline 缺少流域边界: {boundary_path}")
+
+        grid_transform = _grid_transform(longitudes, latitudes)
+        dem_grid = np.full(shape, np.nan, dtype=np.float32)
+        rasterio.warp.reproject(
+            source=dem,
+            destination=dem_grid,
+            src_transform=transform,
+            src_crs=dem_crs,
+            src_nodata=np.nan,
+            dst_transform=grid_transform,
+            dst_crs="EPSG:4326",
+            dst_nodata=np.nan,
+            resampling=rasterio.warp.Resampling.bilinear,
+        )
+        inside_mask = build_inside_mask(longitudes, latitudes, boundary_path) & np.isfinite(dem_grid)
+        if not np.any(inside_mask):
+            raise ValueError("统一 DEM 与 forcing 网格没有流域内重叠像元")
+
+        if orography is not None:
+            if orography.shape != shape:
+                raise ValueError(f"forcing orography_m 网格不一致: {orography.shape} != {shape}")
+            terrain_elevation = np.where(np.isfinite(orography), orography, dem_grid)
+            terrain_source = "GFS_orography_from_unified_forcing"
+        else:
+            terrain_elevation = dem_grid
+            terrain_source = "baseline_dem_reprojected_to_forcing_grid"
+        terrain_fill = float(np.nanmedian(terrain_elevation[inside_mask]))
+        terrain_elevation = np.where(np.isfinite(terrain_elevation), terrain_elevation, terrain_fill)
+        terrain = compute_terrain(terrain_elevation, longitudes, latitudes)
+        terrain["inside_mask"] = inside_mask
+        filled_dem = terrain["orography"]
+        slope_deg = terrain["slope_deg"]
+        aspect_deg = terrain["aspect_deg"]
+        zone_id = terrain["zone_id"]
+        lon_mesh, lat_mesh = np.meshgrid(longitudes, latitudes)
+        longitudes_2d = lon_mesh
+        latitudes_2d = lat_mesh
+    else:
+        if shape != dem.shape:
+            raise ValueError(
+                f"forcing 网格 {shape} 与统一 DEM 网格 {dem.shape} 不一致，且 forcing 不含经纬度；"
+                "不能在缺少空间参考时猜测重采样。"
+            )
+        inside_mask = ~np.ma.getmaskarray(dem_masked) & np.isfinite(dem)
+        rows, cols = np.indices(shape, dtype=np.float64)
+        x_coords = transform.c + (cols + 0.5) * transform.a + (rows + 0.5) * transform.b
+        y_coords = transform.f + (cols + 0.5) * transform.d + (rows + 0.5) * transform.e
+        transformer = Transformer.from_crs(dem_crs, "EPSG:4326", always_xy=True)
+        longitudes_2d, latitudes_2d = transformer.transform(x_coords, y_coords)
+
+        pixel_x = max(abs(float(transform.a)), 1.0)
+        pixel_y = max(abs(float(transform.e)), 1.0)
+        filled_dem = np.where(inside_mask, dem, np.nanmedian(dem[inside_mask]))
+        grad_y, grad_x = np.gradient(filled_dem, pixel_y, pixel_x)
+        slope_deg = np.degrees(np.arctan(np.sqrt(grad_x**2 + grad_y**2))).astype(np.float32)
+        aspect_deg = ((np.degrees(np.arctan2(-grad_x, grad_y)) + 360.0) % 360.0).astype(np.float32)
+        quantile_edges = np.quantile(dem[inside_mask], np.linspace(0.0, 1.0, ELEVATION_BANDS + 1))
+        quantile_edges[0] -= 1.0
+        quantile_edges[-1] += 1.0
+        elevation_band = np.digitize(filled_dem, quantile_edges[1:-1], right=False).astype(np.int16)
+        aspect_class = ((aspect_deg + 45.0) // 90.0).astype(np.int16) % 4
+        zone_id = (elevation_band * 10 + aspect_class).astype(np.int16)
+
+    temp_mean = forcing["temp_mean_c"]
+    temp_min = forcing["temp_min_c"]
+    temp_max = forcing["temp_max_c"]
+    precipitation = forcing["precipitation_mm"]
+    solid = np.clip(forcing["solid_precip_mm"], 0.0, None)
+    snow_cover = np.clip(forcing["snow_cover_fraction"], 0.0, 1.0)
+    viirs_available = np.clip(forcing["viirs_available"], 0.0, 1.0)
+    positive = np.clip(temp_mean, 0.0, None)
+    previous_swe = np.zeros(shape, dtype=np.float32)
+
+    frame = pd.DataFrame(
+        {
+            "latitude": latitudes_2d.ravel(),
+            "longitude": longitudes_2d.ravel(),
+            "elevation_m": filled_dem.ravel(),
+            "slope_deg": slope_deg.ravel(),
+            "aspect_deg": aspect_deg.ravel(),
+            "zone_id": zone_id.ravel(),
+            "doy": business_date_value.timetuple().tm_yday,
+            "temp_mean_c": temp_mean.ravel(),
+            "temp_min_c": temp_min.ravel(),
+            "temp_max_c": temp_max.ravel(),
+            "temp_range_c": (temp_max - temp_min).ravel(),
+            "positive_degree_c": positive.ravel(),
+            "positive_degree_3d": positive.ravel(),
+            "positive_degree_7d": positive.ravel(),
+            "precipitation_mm": precipitation.ravel(),
+            "solid_precip_mm": solid.ravel(),
+            "solid_precip_3d": solid.ravel(),
+            "solid_precip_7d": solid.ravel(),
+            "solid_precip_14d": solid.ravel(),
+            "solid_precip_30d": solid.ravel(),
+            "temp_mean_3d": temp_mean.ravel(),
+            "temp_mean_7d": temp_mean.ravel(),
+            "temp_mean_14d": temp_mean.ravel(),
+            "temp_mean_30d": temp_mean.ravel(),
+            "prev_swe_mm": previous_swe.ravel(),
+            "prev_swe_3d_mean": previous_swe.ravel(),
+            "prev_swe_7d_mean": previous_swe.ravel(),
+            "snow_cover_fraction": snow_cover.ravel(),
+            "viirs_available": viirs_available.ravel(),
+            "snow_cover_persist_3d": snow_cover.ravel(),
+            "snow_cover_persist_7d": snow_cover.ravel(),
+        }
+    )
+
+    bundle = joblib.load(model_file)
+    model = bundle["model"] if isinstance(bundle, dict) else bundle
+    feature_columns = bundle.get("feature_columns", FEATURE_COLUMNS) if isinstance(bundle, dict) else FEATURE_COLUMNS
+    valid_flat = inside_mask.ravel()
+    prediction = np.zeros(valid_flat.shape, dtype=np.float32)
+    prediction[valid_flat] = model.predict(frame.loc[valid_flat, feature_columns]).astype(np.float32)
+    predicted_swe = prediction.reshape(shape)
+
+    base_swe = solid
+    swe = np.clip(np.minimum(predicted_swe, base_swe), 0.0, None)
+    no_snow = (viirs_available > 0.0) & (snow_cover < 0.1)
+    swe = np.where(no_snow, np.minimum(swe, base_swe * 0.1), swe).astype(np.float32)
+    snowmelt = np.clip(base_swe - swe, 0.0, None).astype(np.float32)
+    swe = np.where(inside_mask, swe, NODATA_FLOAT).astype(np.float32)
+    snowmelt = np.where(inside_mask, snowmelt, NODATA_FLOAT).astype(np.float32)
+
+    swe_path = Path(swe_output)
+    snowmelt_path = Path(snowmelt_output)
+    statistics_path = Path(statistics_output)
+    for path in (swe_path, snowmelt_path, statistics_path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    if geographic_grid:
+        save_raster(
+            np.where(inside_mask, swe, np.nan),
+            longitudes,
+            latitudes,
+            swe_path,
+            NODATA_FLOAT,
+            "float32",
+            boundary_path=boundary_path,
+        )
+        save_raster(
+            np.where(inside_mask, snowmelt, np.nan),
+            longitudes,
+            latitudes,
+            snowmelt_path,
+            NODATA_FLOAT,
+            "float32",
+            boundary_path=boundary_path,
+        )
+    else:
+        output_profile = profile.copy()
+        output_profile.update(count=1, dtype="float32", nodata=NODATA_FLOAT, compress="lzw")
+        with rasterio.open(swe_path, "w", **output_profile) as target:
+            target.write(swe, 1)
+        with rasterio.open(snowmelt_path, "w", **output_profile) as target:
+            target.write(snowmelt, 1)
+
+    with rasterio.open(swe_path, "r+") as target:
+        target.set_band_description(1, "SWE_mm")
+        output_shape = [target.height, target.width]
+        output_crs = str(target.crs)
+    with rasterio.open(snowmelt_path, "r+") as target:
+        target.set_band_description(1, "Snowmelt_mm_day")
+
+    valid_swe = np.where(inside_mask, swe, np.nan)
+    valid_melt = np.where(inside_mask, snowmelt, np.nan)
+    stats_row = {
+        "date": business_date_value.isoformat(),
+        "swe_mean_mm": float(np.nanmean(valid_swe)),
+        "swe_max_mm": float(np.nanmax(valid_swe)),
+        "snowmelt_mean_mm_day": float(np.nanmean(valid_melt)),
+        "snowmelt_max_mm_day": float(np.nanmax(valid_melt)),
+        "valid_pixel_count": int(np.count_nonzero(inside_mask)),
+        "cold_start": True,
+        "viirs_missing": viirs_missing,
+        "model_version": bundle.get("model_version", "unknown") if isinstance(bundle, dict) else "unknown",
+    }
+    with statistics_path.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=list(stats_row))
+        writer.writeheader()
+        writer.writerow(stats_row)
+    return {
+        **stats_row,
+        "forcing": str(forcing_file),
+        "dem": str(dem_file),
+        "model": str(model_file),
+        "swe_raster": str(swe_path),
+        "snowmelt_raster": str(snowmelt_path),
+        "statistics": str(statistics_path),
+        "shape": output_shape,
+        "forcing_shape": list(shape),
+        "crs": output_crs,
+        "terrain_source": terrain_source,
+    }
 
 
 def run_legacy_compatible_assessment() -> dict[str, Any]:

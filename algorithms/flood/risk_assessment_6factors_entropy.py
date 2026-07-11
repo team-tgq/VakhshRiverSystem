@@ -11,6 +11,8 @@ import numpy as np
 import rasterio
 from folium.raster_layers import ImageOverlay
 from rasterio.features import rasterize
+from rasterio.enums import Resampling
+from rasterio.warp import reproject
 from scipy.ndimage import distance_transform_edt
 
 try:
@@ -170,6 +172,37 @@ def read_raster(path):
         arr[arr == nodata] = np.nan
 
     return arr, profile, transform, crs
+
+
+def read_raster_on_reference_grid(path, reference_profile, reference_transform, reference_crs, *, resampling):
+    with rasterio.open(path) as src:
+        arr = src.read(1).astype(np.float32)
+        nodata = src.nodata
+        if nodata is not None:
+            arr[arr == nodata] = np.nan
+
+        target_shape = (int(reference_profile["height"]), int(reference_profile["width"]))
+        same_grid = (
+            arr.shape == target_shape
+            and src.crs == reference_crs
+            and src.transform.almost_equals(reference_transform)
+        )
+        if same_grid:
+            return arr
+
+        target = np.full(target_shape, np.nan, dtype=np.float32)
+        reproject(
+            source=arr,
+            destination=target,
+            src_transform=src.transform,
+            src_crs=src.crs,
+            src_nodata=nodata if nodata is not None else np.nan,
+            dst_transform=reference_transform,
+            dst_crs=reference_crs,
+            dst_nodata=np.nan,
+            resampling=resampling,
+        )
+    return target
 
 
 def write_raster(path, arr, profile):
@@ -861,9 +894,27 @@ def run_risk_assessment(
     rivers_path = input_paths["rivers_path"]
 
     dem, profile, transform, crs = read_raster(dem_path)
-    rain, _, _, _ = read_raster(rain_path)
-    soil, _, _, _ = read_raster(soil_path)
-    landcover, _, _, _ = read_raster(landcover_path)
+    rain = read_raster_on_reference_grid(
+        rain_path,
+        profile,
+        transform,
+        crs,
+        resampling=Resampling.bilinear,
+    )
+    soil = read_raster_on_reference_grid(
+        soil_path,
+        profile,
+        transform,
+        crs,
+        resampling=Resampling.bilinear,
+    )
+    landcover = read_raster_on_reference_grid(
+        landcover_path,
+        profile,
+        transform,
+        crs,
+        resampling=Resampling.nearest,
+    )
 
     elev_low = 1.0 - minmax_norm(
         np.clip(dem, np.nanpercentile(dem, 5), np.nanpercentile(dem, 95))

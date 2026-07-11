@@ -24,6 +24,7 @@ runs/
 algorithms/inundation_monitoring/models/best_flood_unet.pth
 !algorithms/water_allocation/resources/models/best.pth
 algorithms/monitoring/data/测试数据/流速测试视频.mp4
+algorithms/inundation_monitoring/output/
 algorithms/swe/snowai/density/density_model.ubj
 algorithms/water_allocation/resources/geodata/*.json
 !algorithms/water_allocation/resources/geodata/*.geojson
@@ -31,3 +32,10 @@ algorithms/water_allocation/resources/geodata/*.json
 !sample_data/**
 !sample_data/**/*.tif
 !sample_data/**/*.mp4
+
+# Local Unity build for M03 flood routing visualization.
+algorithms/routing/tjk/
+algorithms/routing/unity_build/
+algorithms/routing/*.zip
+plugins/routing_plugin/tjk/
+/tjk/

@@ -30,15 +30,19 @@ from algorithms.snow_state import (
     DEFAULT_PROJECT_ID,
     DEFAULT_SOURCES,
     DEFAULT_TASK_PREFIX,
+    SNOW_DENSITY_BY_TYPE_GCM3,
     STATE_LABELS,
     ensure_earth_engine,
     parse_bbox_text,
+    process_local_gee_product,
     submit_runoff_warning_export,
 )
 from app.digital_twin_standard import (
     DEFAULT_PERIOD,
     TARGET_CRS,
     default_run_context,
+    ensure_raw_source_path,
+    infer_run_context_from_path,
     mark_module_complete,
     module_output_path,
     standard_dialog_dir,
@@ -46,13 +50,6 @@ from app.digital_twin_standard import (
 )
 from app.ui_hints import attach_hint, label_with_hint
 from rasterio.enums import Resampling
-
-
-SNOW_DENSITY_BY_TYPE_GCM3 = {
-    1: 0.0,
-    2: 0.25,
-    3: 0.40,
-}
 
 
 def _context_from_target_date(date_text: str | None):
@@ -117,6 +114,7 @@ def _read_state_band_as_target(src_path: str | Path):
 
         nodata = src.nodata
 
+    state = np.where(np.isfinite(state), state, 0)
     state = np.asarray(np.rint(state), dtype=np.int16)
     if nodata is not None and np.isfinite(nodata):
         state = np.where(state == int(round(nodata)), 0, state)
@@ -392,8 +390,8 @@ class SnowStateWidget(QWidget):
     def sync_downloaded_geotiff(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "选择已下载的 GEE GeoTIFF",
-            standard_dialog_dir("processed", module_code="M06"),
+            "选择 raw 中已下载的 GEE GeoTIFF",
+            standard_dialog_dir("raw", module_code="M06"),
             "GeoTIFF (*.tif *.tiff);;All files (*.*)",
         )
         if not path:
@@ -411,41 +409,17 @@ class SnowStateWidget(QWidget):
             QMessageBox.critical(self, "同步失败", str(exc))
 
     def _export_standard_geotiff(self, geotiff_path: str | Path, target_date: str | None = None) -> dict[str, Path]:
-        context = _context_from_target_date(target_date)
+        geotiff_path = ensure_raw_source_path(geotiff_path)
+        context = infer_run_context_from_path(geotiff_path)
         snow_type_tif = module_output_path("M06", context=context, output_index=0)
         snow_density_tif = module_output_path("M06", context=context, output_index=1)
-
-        state, transform, width, height, band_count = _read_state_band_as_target(geotiff_path)
-        density = _density_from_state(state)
-
-        snow_type_tif.parent.mkdir(parents=True, exist_ok=True)
-        state_profile = {
-            "driver": "GTiff",
-            "height": height,
-            "width": width,
-            "count": 1,
-            "dtype": "uint8",
-            "crs": TARGET_CRS,
-            "transform": transform,
-            "nodata": 0,
-            "compress": "lzw",
-        }
-        with rasterio.open(snow_type_tif, "w", **state_profile) as dst:
-            dst.write(state, 1)
-
-        density_profile = {
-            "driver": "GTiff",
-            "height": height,
-            "width": width,
-            "count": 1,
-            "dtype": "float32",
-            "crs": TARGET_CRS,
-            "transform": transform,
-            "nodata": -9999.0,
-            "compress": "lzw",
-        }
-        with rasterio.open(snow_density_tif, "w", **density_profile) as dst:
-            dst.write(density, 1)
+        statistics_csv = module_output_path("M06", context=context, output_index=2)
+        local_result = process_local_gee_product(
+            geotiff_path,
+            snow_type_tif,
+            snow_density_tif,
+            statistics_csv,
+        )
 
         source_files = [geotiff_path]
         common_extra = {
@@ -454,10 +428,10 @@ class SnowStateWidget(QWidget):
             "period": context.period,
             "period_name": context.period_name,
             "source_product": "GEE Snow_State + Runoff_Probability GeoTIFF",
-            "source_band_count": band_count,
+            "source_band_count": local_result["band_count"],
             "source_band_1": "Snow_State",
         }
-        if band_count >= 2:
+        if local_result["band_count"] >= 2:
             common_extra["source_band_2"] = "Runoff_Probability"
         write_metadata_sidecar(
             snow_type_tif,
@@ -479,10 +453,26 @@ class SnowStateWidget(QWidget):
                 **common_extra,
                 "density_mapping_gcm3": SNOW_DENSITY_BY_TYPE_GCM3,
                 "density_mapping_note": "当前由 Snow_State 类别确定性映射：无雪=0，干雪=0.25，湿雪=0.40；后续可替换为实测或模型雪密度。",
+                "density_is_measured": False,
+            },
+        )
+        write_metadata_sidecar(
+            statistics_csv,
+            module_code="M06",
+            field="snow_state_statistics",
+            source_files=source_files,
+            extra={
+                **common_extra,
+                "output_type": "snow_state_statistics",
+                "class_labels": STATE_LABELS,
             },
         )
         mark_module_complete(context, "M06")
-        return {"snow_type": snow_type_tif, "snow_density": snow_density_tif}
+        return {
+            "snow_type": snow_type_tif,
+            "snow_density": snow_density_tif,
+            "statistics": statistics_csv,
+        }
 
     def _validate_date_range(self, start_edit, end_edit, label):
         if start_edit.date() > end_edit.date():

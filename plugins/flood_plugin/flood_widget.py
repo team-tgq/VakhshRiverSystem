@@ -41,9 +41,9 @@ from app.digital_twin_standard import (
     default_run_context,
     mark_module_complete,
     module_output_path,
+    module_processed_dir,
     period_to_date,
-    processed_dir,
-    raw_dir,
+    raw_data_dir,
     write_metadata_sidecar,
 )
 from app.ui_hints import attach_hint, label_with_hint
@@ -51,7 +51,7 @@ from app.ui_hints import attach_hint, label_with_hint
 
 def _target_date_to_context(target_date: str | None):
     if target_date:
-        token = target_date.replace("-", "")[:6]
+        token = target_date.replace("-", "")[:8]
         month = int(token[4:6])
         if 3 <= month <= 5:
             period_name = "融雪模拟"
@@ -61,6 +61,32 @@ def _target_date_to_context(target_date: str | None):
             period_name = "风险模拟"
         return default_run_context(period=token, period_name=period_name)
     return default_run_context()
+
+
+def _unified_factor_inputs(requested_date: str) -> tuple[str, Path, Path, Path]:
+    rain_dir = raw_data_dir("meteorology", "precipitation")
+    soil_dir = raw_data_dir("land_surface", "soil_moisture")
+    rain = {
+        path.stem.replace("rain_mm_demgrid_", ""): path
+        for path in rain_dir.glob("rain_mm_demgrid_*.tif")
+    }
+    soil = {
+        path.stem.replace("soil_moist_demgrid_", ""): path
+        for path in soil_dir.glob("soil_moist_demgrid_*.tif")
+    }
+    dates = sorted(set(rain) & set(soil))
+    if not dates:
+        raise FileNotFoundError("统一 raw 中没有日期匹配的降水和土壤湿度栅格。")
+    requested = requested_date.strip()
+    if requested in dates:
+        selected = requested
+    else:
+        not_later = [value for value in dates if value <= requested]
+        selected = not_later[-1] if not_later else dates[-1]
+    landcover = raw_data_dir("land_surface", "land_cover") / "landcover_demgrid.tif"
+    if not landcover.exists():
+        raise FileNotFoundError(landcover)
+    return selected, rain[selected], soil[selected], landcover
 
 
 def _copy_or_reproject_raster(src_path: str | Path, dst_path: str | Path) -> Path:
@@ -545,8 +571,10 @@ class FloodWidget(QWidget):
             self.log.append(f"开始运行洪涝风险评估，目标日期：{target_date}")
             result = risk_assessment_6factors_entropy.run_risk_assessment(
                 target_date=target_date,
+                auto_prepare_static=False,
                 allow_legacy_dynamic=False,
-                cfg=self._risk_assessment_cfg(context),
+                auto_prepare_dynamic=False,
+                cfg=self._risk_assessment_cfg(context, target_date),
             )
             self.result_paths = result
 
@@ -619,83 +647,99 @@ class FloodWidget(QWidget):
                 self.log.append(f"详细原因：{detail}")
             self._show_user_error("无法加载结果", user_message)
 
-    def _risk_assessment_cfg(self, context):
+    def _risk_assessment_cfg(self, context, target_date: str):
         root = context.root_path
-        period_dir = context.period_dir
-        raster_dir = period_dir / "raster"
-        table_dir = period_dir / "table"
+        selected_date, rain, soil, landcover = _unified_factor_inputs(target_date)
+        output_root = module_processed_dir("M07", root=root, create=True)
+        raster_dir = output_root / "rasters"
+        table_dir = output_root / "tables"
+        visualization_dir = output_root / "visualizations"
         raster_dir.mkdir(parents=True, exist_ok=True)
         table_dir.mkdir(parents=True, exist_ok=True)
-
-        cache_root = processed_dir(root) / "_cache" / "M07_洪涝风险评估"
-        raw_cache = raw_dir(root) / "_cache" / "M07_洪涝风险评估"
-        cache_root.mkdir(parents=True, exist_ok=True)
-        raw_cache.mkdir(parents=True, exist_ok=True)
+        visualization_dir.mkdir(parents=True, exist_ok=True)
 
         return {
             **risk_assessment_6factors_entropy.CFG,
             "study_area_shp": str(baseline_dir(root) / "流域边界.shp"),
             "dem_path": str(baseline_dir(root) / "DEM.tif"),
             "rivers_path": str(baseline_dir(root) / "河网.shp"),
-            "proc_dir": str(cache_root),
-            "raw_dir": str(raw_cache),
-            "out_dir": str(table_dir),
-            "out_risk_tif": str(raster_dir / f"{context.period}_M07_risk_score.tif"),
-            "out_risk_level_tif": str(module_output_path("M07", context=context)),
-            "out_map": str(table_dir / f"{context.period}_M07_flood_risk_map.html"),
-            "out_weights_txt": str(table_dir / f"{context.period}_M07_final_weights.txt"),
-            "out_landuse_stats_csv": str(table_dir / f"{context.period}_M07_landuse_risk_stats.csv"),
-            "out_landuse_summary_txt": str(table_dir / f"{context.period}_M07_landuse_risk_summary.txt"),
+            "rain_path": str(rain),
+            "soil_path": str(soil),
+            "landcover_path": str(landcover),
+            "proc_dir": str(root / "raw"),
+            "raw_dir": str(root / "raw"),
+            "out_dir": str(output_root),
+            "out_risk_tif": str(raster_dir / "flood_risk_index.tif"),
+            "out_risk_level_tif": str(raster_dir / "flood_risk_level.tif"),
+            "out_map": str(visualization_dir / "flood_risk_map.html"),
+            "out_weights_txt": str(table_dir / "final_weights.txt"),
+            "out_landuse_stats_csv": str(table_dir / "landuse_risk_stats.csv"),
+            "out_landuse_summary_txt": str(table_dir / "landuse_risk_summary.txt"),
+            "unified_selected_date": selected_date,
         }
 
     def _export_standard_result(self, result):
         target_date = result.get("resolved_target_date") or result.get("requested_target_date")
         context = _target_date_to_context(target_date)
-        source_tif = result.get("risk_level_tif") or result.get("risk_tif")
-        if not source_tif or not os.path.exists(source_tif):
-            raise FileNotFoundError(f"风险分区源栅格不存在: {source_tif}")
-
-        output_tif = module_output_path("M07", context=context)
-        _copy_or_reproject_raster(source_tif, output_tif)
-        write_metadata_sidecar(
-            output_tif,
-            module_code="M07",
-            field="flood_risk",
-            source_files=[
-                source_tif,
-                result.get("risk_tif", ""),
-                result.get("rain_path", ""),
-                result.get("soil_path", ""),
-                module_output_path("M04", context=context, output_index=0),
-            ],
-            extra={
-                "scheme": context.scheme,
-                "scheme_name": context.scheme_name,
-                "period": context.period,
-                "period_name": context.period_name,
-                "date": period_to_date(context.period),
-                "requested_target_date": result.get("requested_target_date"),
-                "resolved_target_date": result.get("resolved_target_date"),
-                "risk_level_method": result.get("risk_level_method"),
-            },
-        )
+        raw_inputs = [
+            Path(result["rain_path"]),
+            Path(result["soil_path"]),
+            Path(result["landcover_path"]),
+            baseline_dir(context.root_path) / "DEM.tif",
+            baseline_dir(context.root_path) / "河网.shp",
+            baseline_dir(context.root_path) / "流域边界.shp",
+        ]
+        missing_raw = [path for path in raw_inputs if not path.exists()]
+        if missing_raw:
+            raise FileNotFoundError(
+                "M07 洪涝风险评估缺少统一 raw 输入，不能写入 processed 标准成果:\n"
+                + "\n".join(str(path) for path in missing_raw)
+            )
+        outputs = {
+            "risk_tif": "flood_risk_index",
+            "risk_level_tif": "flood_risk_level",
+            "map_html": "flood_risk_visualization",
+            "weights_txt": "factor_weights",
+            "landuse_stats_csv": "landuse_risk_statistics",
+            "landuse_summary_txt": "landuse_risk_summary",
+        }
+        for key, output_type in outputs.items():
+            output_path = Path(result[key])
+            if not output_path.exists():
+                raise FileNotFoundError(output_path)
+            write_metadata_sidecar(
+                output_path,
+                module_code="M07",
+                field=output_type,
+                source_files=raw_inputs,
+                extra={
+                    "output_type": output_type,
+                    "requested_target_date": result.get("requested_target_date"),
+                    "resolved_target_date": result.get("resolved_target_date"),
+                    "risk_level_method": result.get("risk_level_method"),
+                    "threshold_or_config": {
+                        "risk_level_breaks": result.get("risk_level_breaks"),
+                        "final_weights": result.get("final_weights"),
+                    },
+                },
+            )
         mark_module_complete(context, "M07")
-        result["standard_risk_tif"] = str(output_tif)
-        return output_tif
+        result["standard_risk_tif"] = str(result["risk_level_tif"])
+        return Path(result["risk_level_tif"])
 
     def _standard_existing_result(self):
         target_date = self.date_input.date().toString("yyyy-MM-dd")
         context = _target_date_to_context(target_date)
-        standard_tif = module_output_path("M07", context=context)
+        output_root = module_processed_dir("M07", root=context.root_path)
+        standard_tif = output_root / "rasters" / "flood_risk_level.tif"
         if not standard_tif.exists():
             return None
 
-        table_dir = context.period_dir / "table"
-        cache_root = processed_dir(context.root_path) / "_cache" / "M07_洪涝风险评估"
-        map_html = table_dir / f"{context.period}_M07_flood_risk_map.html"
-        landcover_path = cache_root / "landcover_demgrid.tif"
-        landuse_stats_csv = table_dir / f"{context.period}_M07_landuse_risk_stats.csv"
-        landuse_summary_txt = table_dir / f"{context.period}_M07_landuse_risk_summary.txt"
+        table_dir = output_root / "tables"
+        map_html = output_root / "visualizations" / "flood_risk_map.html"
+        landcover_path = raw_data_dir("land_surface", "land_cover") / "landcover_demgrid.tif"
+        landuse_stats_csv = table_dir / "landuse_risk_stats.csv"
+        landuse_summary_txt = table_dir / "landuse_risk_summary.txt"
 
         return {
             "risk_tif": str(standard_tif),
