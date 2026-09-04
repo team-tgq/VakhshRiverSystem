@@ -2,6 +2,7 @@
 import ee
 import geemap
 import geopandas as gpd
+import os
 from pathlib import Path
 
 # 资源目录
@@ -14,24 +15,21 @@ WORLDCOVER_VERSION = "v200"
 CROPLAND_CODE = 40                     # WorldCover 耕地类
 SCALE = 10
 GEE_PROJECT = "skillful-source-494707-h7"
-
+# 密钥文件默认路径
+_DEFAULT_WEIGHTS = str(Path(__file__).resolve().parent.parent / "resources" / "geedata" / "skillful-source-494707-h7-8f7b2bebcf57.json")
 
 def get_cropland_area_km2(year=None, scale=SCALE, gee_project=None):
     """
     从 Google Earth Engine 获取哈特隆州耕地面积（平方公里）
 
     数据源: ESA WorldCover 10m (年度产品, 含休耕/轮作的全年耕地, 类码 40)。
-    相比旧版 MODIS 500m, 分辨率提升 50 倍, 与 FTW 10m 结果可公平对比。
-
-    Args:
-        year: 兼容旧接口, 忽略 (WorldCover 仅 2020/2021, 取最新版 v200=2021)
-        scale: 分辨率（米），默认 10
-        gee_project: GEE 项目 ID，默认为 None（使用模块默认配置）
+    
 
     Returns:
         float: 耕地面积（平方公里）
     """
     try:
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = _DEFAULT_WEIGHTS
         project_id = gee_project if gee_project else GEE_PROJECT
         ee.Initialize(project=project_id)
 
